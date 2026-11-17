@@ -1,0 +1,18 @@
+# Entity and transcription (both go through Gemini)
+google-genai>=1.0
+python-dotenv
+
+# Recording
+numpy
+sounddevice
+soundfile
+
+# e-paper rendering
+Pillow
+
+# Waveshare driver dependencies — Raspberry Pi only
+spidev; sys_platform == "linux"
+gpiozero; sys_platform == "linux"
+
+# Smart plugs: not used by main.py, see plugs.py
+# python-kasa

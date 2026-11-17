@@ -1,0 +1,10 @@
+.env
+.venv/
+venv/
+__pycache__/
+*.pyc
+screen.png
+prayer.wav
+question.wav
+debug.wav
+/examples/*

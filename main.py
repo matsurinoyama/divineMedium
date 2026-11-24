@@ -10,19 +10,18 @@ from dotenv import load_dotenv
 import anthropic
 import numpy as np
 from elevenlabs.client import ElevenLabs
-from google import genai
 
-# Before the local imports: gemini, audio and display read their settings from the
+# Before the local imports: llm, audio and display read their settings from the
 # environment at import time.
 load_dotenv()
 
 import consent
-import gemini
 import listen
 import llm
 import tts
 # import plugs                      # smart plugs — see the commented calls below
 from audio import (
+    PRAYER_SAMPLE_RATE,
     bell_mix,
     compress_for_ivc,
     is_silent,
@@ -47,7 +46,6 @@ from control import (
 from display import BACKGROUND, BLACK, BLUE, GOLD, RED, TEXT_COLOR, WHITE, Display
 from llm import CHARACTER_COUNTED, ask_entity, inscribe
 from prompts import FAREWELL_REQUEST, GREETING_REQUEST
-from stt import transcribe
 
 # File paths used during a session
 DEBUG_WAV = "debug.wav"        # if present, skips prayer recording and uses this file
@@ -189,9 +187,8 @@ def utter(
 
 
 def run_ritual(
-    client: genai.Client,
     entity: anthropic.Anthropic,
-    eleven: ElevenLabs | None,
+    eleven: ElevenLabs,
     display: Display,
     session: Session,
     language: str,
@@ -233,6 +230,7 @@ def run_ritual(
 
         # ── PRAYER ────────────────────────────────────────────────────────────
         session.stage = PRAYER
+        hearing: listen.Listener | None = None
         if os.path.exists(DEBUG_WAV):
             print("\n  [Debug mode enabled: using existing recording in debug.wav]")
             prayer_audio = DEBUG_WAV
@@ -241,9 +239,16 @@ def run_ritual(
             # The short prayer replaces the consent form while recording is
             # already running, so nothing said during the refresh is lost.
             invitation = Panel(display, consent.PRAYERS[language], PRAYER_STYLE)
-            record_prayer(session, PRAYER_WAV)
+            # Transcribed as it is spoken, so the words are there at the final tap
+            hearing = listen.Listener(eleven, language, rate=PRAYER_SAMPLE_RATE)
+            try:
+                record_prayer(session, PRAYER_WAV, hear=hearing.send)
+            finally:
+                if session.abort.is_set():
+                    hearing.close()
             check(session)
             if not os.path.exists(PRAYER_WAV) or is_silent(PRAYER_WAV):
+                hearing.close()
                 print("  (nothing was offered — returning to idle)\n")
                 return
 
@@ -266,7 +271,11 @@ def run_ritual(
             cloning = pool.submit(clone)
             print("  [Transcribing...]")
             try:
-                prayer_text, prayer_lang = transcribe(client, prayer_audio, language=language)
+                prayer_text = hearing.finish() if hearing is not None else ""
+                if not prayer_text:
+                    # No live transcript (or debug.wav): the recording itself
+                    prayer_text = listen.transcribe(eleven, prayer_audio, language=language)
+                prayer_lang = language
             finally:
                 # Waited for even when the prayer turns out empty or the session
                 # ends, so that a clone made for nothing is still deleted below.
@@ -297,8 +306,8 @@ def run_ritual(
             # The question is transcribed live as it is spoken. Now and then the
             # entity does not wait for the end: once enough has been said, it cuts
             # in and answers what the seeker was about to ask.
-            live = listen.Listener(eleven, language, context=prayer_text) if eleven is not None else None
-            foreknowing = live is not None and random.random() < FOREKNOW_CHANCE
+            live = listen.Listener(eleven, language, context=prayer_text)
+            foreknowing = random.random() < FOREKNOW_CHANCE
             enough = random.randint(*FOREKNOW_AT[language in CHARACTER_COUNTED])
             cut = False
 
@@ -311,12 +320,11 @@ def run_ritual(
                 session, QUESTION_WAV,
                 on_start=lambda: show_wordless(LISTENING_STYLE),
                 on_end=lambda: show_wordless(HEARD_STYLE),
-                hear=live.send if live is not None else None,
+                hear=live.send,
                 cut_in=cut_in if foreknowing else None,
             )
             if ended or session.abort.is_set():
-                if live is not None:
-                    live.close()
+                live.close()
             check(session)
             if ended:
                 break
@@ -325,12 +333,14 @@ def run_ritual(
                 question = live.heard
                 live.close()
             else:
-                question = live.finish() if live is not None else ""
+                question = live.finish()
                 if not question and not is_silent(QUESTION_WAV):
                     # No live transcript (no network, no ElevenLabs): the recording itself
-                    question, _ = transcribe(client, QUESTION_WAV, language=language)
+                    question = listen.transcribe(eleven, QUESTION_WAV, language=language)
             os.remove(QUESTION_WAV)
             check(session)
+            # Live transcripts can open on a stray mark from the silence before speech
+            question = question.lstrip("。、.,!?！？ 　").strip()
 
             if not question:
                 print("  (nothing intelligible — try again)\n")
@@ -398,13 +408,11 @@ def run_ritual(
 
 def main() -> None:
     # Event loop: shows the consent form, runs a session once it is given, repeats.
-    client = gemini.make_client()
     entity = llm.make_client()
     eleven = tts.make_client()
-    if eleven is not None:
-        # Clones a crash or a power cut kept the last session from deleting
-        tts.sweep(eleven)
-    print(f"  [entity: {llm.MODEL} · transcription: {gemini.MODEL}]")
+    # Clones a crash or a power cut kept the last session from deleting
+    tts.sweep(eleven)
+    print(f"  [entity: {llm.MODEL} · transcription: {listen.MODEL_ID}]")
 
     language = DEFAULT_LANGUAGE
     with Display() as display, raw_keyboard(), button_pipe():
@@ -423,7 +431,7 @@ def main() -> None:
             session = Session()
             # control.attach_buttons(session)   # GPIO buttons — see control.py
             ritual_thread = threading.Thread(
-                target=run_ritual, args=(client, entity, eleven, display, session, language), daemon=True
+                target=run_ritual, args=(entity, eleven, display, session, language), daemon=True
             )
             ritual_thread.start()
 

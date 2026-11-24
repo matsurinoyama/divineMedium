@@ -1,10 +1,10 @@
-# The entity speaks through Claude; Gemini transcribes
+# The entity speaks through Claude; ElevenLabs hears (Scribe), clones and speaks
 anthropic
-google-genai>=1.0
 python-dotenv
 
-# Voice clone and speech
+# Transcription, voice clone and speech
 elevenlabs
+websockets  # Scribe realtime
 
 # Recording and playback
 numpy

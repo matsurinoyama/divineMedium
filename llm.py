@@ -9,9 +9,9 @@ import anthropic
 from display import BUDGET_CJK_CHARS, BUDGET_WORDS, fits, too_wide
 from prompts import INSCRIPTION_PROMPT, build_system_prompt
 
-# The entity speaks through Claude, as it did in tuhanKami; Gemini only transcribes.
-# Gemini stepped out of the voice under pressure (a seeker demanding proof about
-# illness or birth) in most turns; Claude holds it.
+# The entity speaks through Claude, as it did in tuhanKami. (Gemini, tried for a
+# while, stepped out of the voice under pressure — a seeker demanding proof about
+# illness or birth — in most turns; Claude holds it.)
 MODEL = os.getenv("ENTITY_MODEL", "claude-haiku-5-5")
 
 # Haiku answers with thinking off: a two-sentence utterance gains nothing from it,
@@ -201,7 +201,8 @@ INSCRIPTION_CJK_CHARS = 48  # japanese, in all
 # address "you", and the model can mistake them for a message to itself.
 META_RE = re.compile(
     r"\b(verse|poem|poetry|inscri\w*|the god|god's words|stanza|the passage"
-    r"|you('ve| have)? (gave|given)|tell me what)\b|詩|碑文|刻",
+    r"|you('ve| have)? (gave|given)|tell me what|count\w*|characters?|words? per)\b"
+    r"|詩|碑文|刻|文字数",
     re.IGNORECASE,
 )
 
@@ -209,8 +210,19 @@ META_RE = re.compile(
 def format_inscription(text: str) -> str:
     # Clean the poem but keep its line breaks: here they are the verse.
     text = MARKDOWN_RE.sub("", TAG_RE.sub("", text))
-    lines = (" ".join(line.split()).strip('"“”「」') for line in text.splitlines())
+    lines = (unquote(" ".join(line.split())) for line in text.splitlines())
     return "\n".join(line for line in lines if line)
+
+
+QUOTES = {'"': '"', "“": "”", "「": "」", "『": "』"}
+
+
+def unquote(line: str) -> str:
+    # Drop quotation marks that wrap a whole line, as models like to; keep a quote
+    # that only opens or closes part of it (「少しずつ話してみたい」と。).
+    if len(line) > 1 and QUOTES.get(line[0]) == line[-1]:
+        return line[1:-1].strip()
+    return line
 
 
 def inscribe(client: anthropic.Anthropic, utterance: str, language: str = "en") -> str:
@@ -249,6 +261,5 @@ def inscribe(client: anthropic.Anthropic, utterance: str, language: str = "en") 
 
 # ── Echo voice ────────────────────────────────────────────────────────────────
 # tuhanKami's second voice — the fragmented, hallucinatory repetition fed to the
-# surrounding speakers — has no text-only equivalent and is dropped here. When the
-# audio layer comes back, port ask_echo() from base/tuhanKami/llm.py; it needs
-# nothing from this module beyond gemini.generate().
+# surrounding speakers — is not here yet. Port ask_echo() from
+# base/tuhanKami/llm.py; it needs nothing from this module beyond generate().

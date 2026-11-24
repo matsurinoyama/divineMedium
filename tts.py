@@ -47,12 +47,12 @@ def with_retry(fn: Callable[[], Any], label: str, tries: int = 4) -> Any:
             time.sleep(wait)
 
 
-def make_client() -> ElevenLabs | None:
-    # The voice is optional: without a key the installation runs text-only.
+def make_client() -> ElevenLabs:
+    # ElevenLabs hears every word as well as speaking them: it is required. If the
+    # voice clone itself fails, a session still carries on text-only.
     key = os.environ.get("ELEVENLABS_API_KEY")
     if not key:
-        print("  [voice: ELEVENLABS_API_KEY is not set — running text-only]")
-        return None
+        raise RuntimeError("ELEVENLABS_API_KEY is not set — see .env")
     return ElevenLabs(api_key=key)
 
 

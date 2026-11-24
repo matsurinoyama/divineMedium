@@ -56,12 +56,17 @@ def is_silent(filename: str, threshold: float = 0.001) -> bool:
 
 
 def record_until_tap(
-    session: "Session", filename: str, rate: int, *cancels: threading.Event
+    session: "Session",
+    filename: str,
+    rate: int,
+    *cancels: threading.Event,
+    hear: Callable[[bytes], None] | None = None,
 ) -> bool:
     """
     Record from now until the seeker taps. Returns True and writes filename when a
     tap ends it; returns False, writing nothing, if any of cancels is set first.
     The tap that ends it is consumed, so it cannot also open the next recording.
+    hear, if given, receives every chunk as 16-bit PCM as it is captured.
     """
     chunks: list[np.ndarray] = []
     q: queue.Queue = queue.Queue()
@@ -85,9 +90,12 @@ def record_until_tap(
                 tapped = True
                 break
             try:
-                chunks.append(q.get(timeout=0.1))
+                chunk = q.get(timeout=0.1)
             except queue.Empty:
-                pass
+                continue
+            chunks.append(chunk)
+            if hear is not None:
+                hear((np.clip(chunk, -1.0, 1.0) * 32767).astype("<i2").tobytes())
     session.tap.clear()
 
     if tapped and chunks:
@@ -95,9 +103,11 @@ def record_until_tap(
     return tapped
 
 
-def record_prayer(session: "Session", filename: str) -> None:
+def record_prayer(
+    session: "Session", filename: str, hear: Callable[[bytes], None] | None = None
+) -> None:
     # Recording starts at consent and runs until the seeker taps once.
-    record_until_tap(session, filename, PRAYER_SAMPLE_RATE, session.abort)
+    record_until_tap(session, filename, PRAYER_SAMPLE_RATE, session.abort, hear=hear)
 
 
 def record_question(

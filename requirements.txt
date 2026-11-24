@@ -1,4 +1,5 @@
-# Entity and transcription (both go through Gemini)
+# The entity speaks through Claude; Gemini transcribes
+anthropic
 google-genai>=1.0
 python-dotenv
 

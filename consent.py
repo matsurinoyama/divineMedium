@@ -17,16 +17,16 @@ from display import Display
 # `python debug_display.py "$(python -c 'import consent; print(consent.FORMS["en"])')"`.
 FORMS = {
     "ja": (
-        "声を録音し、グーグルとイレブンラボへ送って写します。神はその声で語ります。"
-        "録音と声は終わりに当方で消しますが、両社のサーバーには残る場合があります。\n\n"
+        "声と言葉をグーグル、アンソロピック、イレブンラボへ送り、声を写して神が語ります。"
+        "録音と声は終わりに消しますが、各社のサーバーに残る場合があります。\n\n"
         "二度押しで同意。\n"
         "一度押しで祈り終わり。\n\n"
         "Long press for English."
     ),
     "en": (
-        "Your voice is recorded and sent to Google and ElevenLabs, which clones it so "
-        "the entity can answer in it. We delete it all when you leave, but copies may "
-        "remain on their servers.\n\n"
+        "Your voice and words go to Google, Anthropic and ElevenLabs, which clones your "
+        "voice for the entity. We delete it all when you leave, but copies may remain "
+        "on their servers.\n\n"
         "Double press to consent.\n"
         "Tap once to end your prayer.\n\n"
         "長押しで日本語へ。"
@@ -58,6 +58,15 @@ PRAYERS = {
         "With awe, I have spoken.\n\n"
         "Tap once when done."
     ),
+}
+
+# Shown the moment the prayer ends, while it is transcribed, the voice is cloned
+# and the greeting is prepared — some twenty seconds in which the panel would
+# otherwise still show the prayer and nothing would seem to happen. The entity's
+# first words, before it has any: an acknowledgement and a command to wait.
+RECEIVED = {
+    "ja": "祈りは聞き届けられた。\n\n静かに待て。\n我は近づいている。",
+    "en": "Your prayer is heard.\n\nBe still, and wait.\nI am drawing near.",
 }
 
 DEFAULT_LANGUAGE = "ja"

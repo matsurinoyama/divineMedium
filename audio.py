@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import functools
 import os
 import queue
 import random
@@ -24,12 +25,6 @@ PRAYER_SAMPLE_RATE = 44100
 # bells, which are resampled to it.
 PLAYBACK_RATE = 24000
 
-# VAD constants used by record_question
-VAD_CAL_CHUNKS = 20     # ~1 second of ambient noise to calibrate the threshold
-VAD_MULTIPLIER = 2      # speech threshold = ambient RMS × this
-VAD_ONSET_CHUNKS = 2    # consecutive loud chunks required before recording starts
-VAD_SILENCE_SECS = 1.5  # seconds of silence that ends the recording
-
 # Input device for prayer and question recording. None = system default; on a Pi
 # with a USB microphone this is usually right without touching it.
 _speech_input = os.getenv("SPEECH_INPUT")
@@ -40,8 +35,8 @@ MAIN_OUTPUT: int | str | None = int(_main_output) if (_main_output or "").isdigi
 
 BELLS = [f"bonsho/Bonsho04-{n}.mp3" for n in range(1, 5)]
 
-# Ignore the stop signal briefly after recording starts, so the same keypress that
-# began the prayer cannot also end it.
+# Ignore taps briefly after recording starts, so the same press that began a
+# recording (consent, or the tap that opens a question) cannot also end it.
 START_GRACE_SECS = 0.6
 
 
@@ -51,113 +46,69 @@ def is_silent(filename: str, threshold: float = 0.001) -> bool:
     return float(np.abs(data).mean()) < threshold
 
 
-def record_prayer(session: "Session", filename: str) -> None:
-    # Record continuously until the operator signals stop ('o') or aborts.
+def record_until_tap(
+    session: "Session", filename: str, rate: int, *cancels: threading.Event
+) -> bool:
+    """
+    Record from now until the seeker taps. Returns True and writes filename when a
+    tap ends it; returns False, writing nothing, if any of cancels is set first.
+    The tap that ends it is consumed, so it cannot also open the next recording.
+    """
     chunks: list[np.ndarray] = []
     q: queue.Queue = queue.Queue()
-    CHUNK_SIZE = int(PRAYER_SAMPLE_RATE * 0.05)
+    CHUNK_SIZE = int(rate * 0.05)
 
-    session.stop.clear()
+    session.tap.clear()
     grace_until = time.monotonic() + START_GRACE_SECS
 
     def callback(indata, _frames, _t, _status):
         q.put(indata.copy())
 
-    with sd.InputStream(samplerate=PRAYER_SAMPLE_RATE, device=SPEECH_INPUT, channels=1,
+    tapped = False
+    with sd.InputStream(samplerate=rate, device=SPEECH_INPUT, channels=1,
                         dtype="float32", blocksize=CHUNK_SIZE, callback=callback):
         while True:
-            if session.abort.is_set():
+            if any(e.is_set() for e in cancels):
                 break
             if time.monotonic() < grace_until:
-                session.stop.clear()
-            elif session.stop.is_set():
+                session.tap.clear()
+            elif session.tap.is_set():
+                tapped = True
                 break
             try:
                 chunks.append(q.get(timeout=0.1))
             except queue.Empty:
                 pass
+    session.tap.clear()
 
-    if chunks:
-        sf.write(filename, np.concatenate(chunks, axis=0), PRAYER_SAMPLE_RATE, subtype="PCM_16")
+    if tapped and chunks:
+        sf.write(filename, np.concatenate(chunks, axis=0), rate, subtype="PCM_16")
+    return tapped
+
+
+def record_prayer(session: "Session", filename: str) -> None:
+    # Recording starts at consent and runs until the seeker taps once.
+    record_until_tap(session, filename, PRAYER_SAMPLE_RATE, session.abort)
 
 
 def record_question(session: "Session", filename: str) -> bool:
     """
-    Record a question using voice activity detection. Returns True if the operator
-    ended the session instead ('e').
+    One question, controlled by the button: wait for a tap, record until the next.
+    Returns True if the seeker ended the session (a double press) instead — while
+    waiting, or mid-question, in which case the unfinished question is dropped.
 
-    Pipeline:
-      1. Calibrate ambient noise level over VAD_CAL_CHUNKS (≈1 second).
-      2. Wait for VAD_ONSET_CHUNKS consecutive loud chunks (prevents false triggers).
-      3. Record until VAD_SILENCE_SECS of consecutive quiet chunks.
-      4. Save to filename at SAMPLE_RATE.
-    paused discards the current take so the operator can intervene.
+    A tap made while the entity was still answering is kept and opens the
+    question straight away: that seeker is ready to speak.
     """
-    CHUNK_SIZE = int(SAMPLE_RATE * 0.05)
-    SILENCE_CHUNKS = int(VAD_SILENCE_SECS / 0.05)
+    print("  [Waiting — tap once to ask, again when done]")
+    while not session.tap.is_set():
+        if session.end.is_set() or session.abort.is_set():
+            return session.end.is_set()
+        time.sleep(0.05)
 
-    q: queue.Queue = queue.Queue()
-    chunks: list[np.ndarray] = []
-    cal_rms: list[float] = []
-    speech_started = False
-    onset_count = 0
-    silence_count = 0
-    vad_threshold = 0.001
-
-    def callback(indata, _frames, _t, _status):
-        q.put(indata.copy())
-
-    print("  [Listening...]")
-    with sd.InputStream(samplerate=SAMPLE_RATE, device=SPEECH_INPUT, channels=1,
-                        dtype="float32", blocksize=CHUNK_SIZE, callback=callback):
-        while True:
-            if session.end.is_set() or session.abort.is_set():
-                return session.end.is_set()
-
-            try:
-                chunk = q.get(timeout=0.1)
-            except queue.Empty:
-                continue
-
-            # Phase 1: calibrate noise floor
-            if len(cal_rms) < VAD_CAL_CHUNKS:
-                cal_rms.append(float(np.sqrt(np.mean(chunk ** 2))))
-                if len(cal_rms) == VAD_CAL_CHUNKS:
-                    vad_threshold = max(float(np.mean(cal_rms)) * VAD_MULTIPLIER, 0.001)
-                continue
-
-            # Operator pause: discard everything and restart
-            if session.paused.is_set():
-                speech_started = False
-                onset_count = 0
-                silence_count = 0
-                chunks.clear()
-                continue
-
-            if not speech_started:
-                # Phase 2: wait for onset (avoids triggering on transient noise)
-                rms = float(np.sqrt(np.mean(chunk ** 2)))
-                if rms > vad_threshold:
-                    onset_count += 1
-                    if onset_count >= VAD_ONSET_CHUNKS:
-                        speech_started = True
-                        print("  [Speaking...]")
-                        chunks.append(chunk)
-                else:
-                    onset_count = 0
-            else:
-                # Phase 3: record until sustained silence
-                chunks.append(chunk)
-                rms = float(np.sqrt(np.mean(chunk ** 2)))
-                if rms > vad_threshold:
-                    silence_count = 0
-                else:
-                    silence_count += 1
-                    if silence_count >= SILENCE_CHUNKS:
-                        break
-
-    if chunks:
-        sf.write(filename, np.concatenate(chunks, axis=0), SAMPLE_RATE, subtype="PCM_16")
+    print("  [Recording question...]")
+    if not record_until_tap(session, filename, SAMPLE_RATE, session.end, session.abort):
+        return session.end.is_set()
     return False
 
 
@@ -248,8 +199,10 @@ def build_voice(pcm: bytes) -> np.ndarray:
     return np.concatenate([processed, np.zeros(int(0.5 * PLAYBACK_RATE), dtype="float32")])
 
 
+@functools.lru_cache(maxsize=None)
 def load_bell(bell_path: str) -> np.ndarray:
-    # Load a bell audio file, mix to mono, and resample to PLAYBACK_RATE.
+    # Load a bell audio file, mix to mono, and resample to PLAYBACK_RATE. Cached,
+    # as the resample is slow on a Pi; callers must not modify the returned array.
     data, rate = sf.read(bell_path, dtype="float32")
     if data.ndim > 1:
         data = data.mean(axis=1)

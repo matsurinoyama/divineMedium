@@ -10,8 +10,8 @@ The original is an audio piece — cloned voices, bells, an echo thrown across s
 
 | | tuhanKami | this |
 | --- | --- | --- |
-| Entity | Claude (`claude-haiku-4-5`) | Gemini (`gemini-flash-latest`) |
-| Transcription | local Whisper `small` | Gemini, same key and model |
+| Entity | Claude (`claude-haiku-4-5`) | Claude (`claude-haiku-5-5`) |
+| Transcription | local Whisper `small` | Gemini (`gemini-3.8-flash`) |
 | Output | two cloned voices, bells, echo speakers | one e-paper screen per utterance, spoken in the cloned voice over bells |
 | Voice cloning | ElevenLabs IVC + remix | ElevenLabs IVC only — the seeker's own voice, no remix or pitch shift, reverse reverb only; no echo voice yet |
 | Discrete input | double clap, detected on the microphone | PiSugar button or keyboard (GPIO buttons ready in `control.py`) |
@@ -19,14 +19,14 @@ The original is an audio piece — cloned voices, bells, an echo thrown across s
 | Smart plugs | driven through the ritual | kept in `plugs.py`, every call commented out |
 | Platform | macOS | Raspberry Pi (the panel is SPI/GPIO) |
 
-The audio input half is unchanged: the same voice-activity detection records a question and stops on silence.
+Questions are no longer detected by voice activity: the participant taps the button once to start speaking and once more to finish.
 
 ## How It Works
 
 0. **Consent** — Between sessions the panel shows a consent form, in Japanese. A long press switches it to English (and back); the language the participant consents in is the session's language. A double press gives consent.
 1. **Prayer** — Recording starts as soon as consent is given. The participant speaks a prayer aloud and taps once to end it. The entity learns the seeker's voice and concerns from what they offer.
-2. **Arrival** — Gemini transcribes the prayer and ElevenLabs clones the voice from it. A bell tolls; three seconds in, the entity speaks a greeting drawn from the prayer, in the seeker's own voice, while the panel paints the same words (about twenty seconds).
-3. **Dialogue** — The participant speaks; the microphone detects speech and stops on silence. The question is transcribed, the entity answers, and the answer is spoken and replaces the greeting on the panel.
+2. **Arrival** — As the prayer ends, the panel turns white on black: *Your prayer is heard. Be still, and wait. I am drawing near.* Meanwhile Gemini transcribes the prayer and ElevenLabs clones the voice from it. A bell tolls; three seconds in, the entity speaks a greeting drawn from the prayer, in the seeker's own voice, while the panel paints the same words (about twenty seconds).
+3. **Dialogue** — The participant taps once, speaks a question, and taps again. The question is transcribed, the entity answers, and the answer is spoken and replaces the greeting on the panel.
 4. **Departure** — A double press. The entity speaks and prints a farewell, three bells toll, the voice clone and the recordings are deleted, and the consent form returns. No trace remains.
 
 ### Signal flow
@@ -44,9 +44,9 @@ The audio input half is unchanged: the same voice-activity detection records a q
   [audio.py]  bell_mix + play — bell, greeting 3 s in, reverse reverb
   [display.py] show — one full-panel refresh (~20 s), alongside the voice
        ↓
-  ┌─────── Participant speaks a question (auto-detected) ──────────────────┐
-  │   [audio.py]   record_question — VAD calibrates, detects onset,       │
-  │                records until 1.5 s of silence                         │
+  ┌─────── Participant asks a question ────────────────────────────────────┐
+  │   [audio.py]   record_question — waits for a tap ('o'), then records  │
+  │                until the next tap                                     │
   │   [stt.py]     transcribe — question text + language                  │
   │   [llm.py]     ask_entity — answer, capped to one screen              │
   │   [tts.py]     speak — answer in the cloned voice                     │
@@ -66,12 +66,12 @@ The audio input half is unchanged: the same voice-activity detection records a q
 | `consent.py` | The consent form (Japanese / English) and the wait for consent |
 | `tts.py` | ElevenLabs: voice cloning, synthesis, deletion |
 | `display.py` | E-paper rendering: fitting, wrapping, horizontal and vertical setting |
-| `audio.py` | Prayer capture, VAD question capture, reverse reverb, bells, playback |
+| `audio.py` | Tap-controlled prayer and question capture, reverse reverb, bells, playback |
 | `control.py` | `Session` events, the keyboard and button-pipe reader, and the GPIO button block |
 | `pisugar_button.sh` | Forwards PiSugar button taps to `main.py` |
 | `stt.py` | Gemini audio transcription |
-| `llm.py` | Gemini entity responses and length budgeting |
-| `gemini.py` | Shared client, safety settings, retries, thinking-off |
+| `llm.py` | Claude entity responses, length budgeting, and the out-of-character guard |
+| `gemini.py` | Gemini client for transcription: safety settings, retries, thinking-off |
 | `prompts.py` | Entity system prompt (the persona and its rules) |
 | `plugs.py` | TP-Link smart plugs — present, never called |
 | `debug_display.py` | Render text to the panel or to `screen.png` without a ritual |
@@ -96,7 +96,8 @@ The panel has no partial refresh: every update is a full repaint of roughly fift
 - Python 3.11+
 - A Raspberry Pi with SPI enabled (`sudo raspi-config` → Interface Options → SPI)
 - PortAudio (`sudo apt install libportaudio2`, or `brew install portaudio` on macOS)
-- A [Gemini API key](https://aistudio.google.com/apikey)
+- A [Gemini API key](https://aistudio.google.com/apikey) (transcription)
+- An [Anthropic API key](https://platform.claude.com/settings/keys) (the entity)
 - An [ElevenLabs API key](https://elevenlabs.io/app/settings/api-keys) with voice cloning (without one, sessions run text-only with the bells)
 
 ### Setup
@@ -113,7 +114,9 @@ pip install -r requirements.txt
 
 ```
 GEMINI_API_KEY=your_gemini_key_here
+ANTHROPIC_API_KEY=your_anthropic_key_here
 ELEVENLABS_API_KEY=your_elevenlabs_key_here
+# ENTITY_MODEL=claude-haiku-5-5      # the Claude model that speaks as the entity
 # GEMINI_MODEL=gemini-3.8-flash      # gemini-flash-latest is not served on the v1 API
 # LANGUAGE_OVERRIDE=en               # the language the consent form opens in (default ja)
 # EPAPER_MOCK=1                      # render to screen.png instead of the panel
@@ -152,7 +155,7 @@ python3 main.py
 | --- | --- |
 | `e` | On the consent form, consents and begins the prayer; in the dialogue, ends the ritual with a farewell (and cuts short an answer being spoken) |
 | `i`/`p` | On the consent form, switches Japanese / English; otherwise interrupts and returns to the consent form |
-| `o` | Ends the prayer recording; held, pauses a question take |
+| `o` | Ends the prayer recording; in the dialogue, starts a question and then finishes it |
 | `Ctrl-C` | Exits |
 
 ### PiSugar button
@@ -165,7 +168,7 @@ python3 main.py
 /home/matsurinoyama/divineMedium/pisugar_button.sh long
 ```
 
-There is no hold-to-pause on the button; a single tap during the dialogue discards the question take in progress instead.
+In the dialogue, a single tap starts a question and the next one finishes it. A double press ends the ritual even mid-question; that unfinished question is dropped.
 
 ### Buttons
 
@@ -204,7 +207,7 @@ The font is FOT-ShinGyoRei StdN, a semi-cursive brush face — the hand of somet
 
 ## Entity Behaviour
 
-The entity is powered by `gemini-flash-latest`. Its persona is defined in [prompts.py](prompts.py):
+The entity is powered by Claude (`claude-haiku-5-5`, set by `ENTITY_MODEL`). It was moved off Gemini, which stepped out of the role and spoke as an AI in most turns when a seeker pressed it for proof about illness or birth. Its persona is defined in [prompts.py](prompts.py):
 
 - It speaks as a deity.
 - It draws directly on the prayer: the stated fears, desires and circumstances inform every answer.
@@ -215,18 +218,17 @@ The entity is powered by `gemini-flash-latest`. Its persona is defined in [promp
 
 The underlying principle, encoded explicitly in the system prompt, is Jaynes': the voice of god is a reflection of the seeker's own mind.
 
-Safety filters are set to `BLOCK_NONE`. A prayer is often about illness, debt, death or a failing relationship, and the entity answers in the voice of a deity; the default filters refuse both halves of that, and a refusal printed on the panel ends the piece.
+- It stays in the voice to the end. The prompt tells it that every seeker consented to an artwork, and that when pressed for proof it answers as an oracle — a test of faith, the mystery kept — never stating a medical outcome as fact.
+- As a backstop, `llm.py` discards any reply that names itself an AI, the role or the installation, or refers the seeker to a professional; it asks once more, and if that also fails, a short in-character line is used instead. Neither is ever shown, spoken or kept in the conversation.
 
-## Bringing the voice back
+Gemini's safety filters (transcription only) are set to `BLOCK_NONE`: a prayer is often about illness, debt or death, and a filtered transcript would end the session.
 
-The audio layer was removed, not redesigned around. When it returns:
+## The echo voice (not yet)
 
-- `base/tuhanKami/audio.py` holds the playback chain — pitch shift, reverse reverb, the interruptible main voice, the bells, and `BackgroundEchoPlayer` for the surrounding speakers.
-- `base/tuhanKami/tts.py` holds ElevenLabs cloning and synthesis, and `ask_echo` in `base/tuhanKami/llm.py` generates the fragmented echo text.
-- `display.show()` blocks for the full refresh. Speaking while the panel paints means handing it to a thread and deciding what the participant is meant to be doing during those twenty seconds — the panel's slowness is a timing constraint on the piece, not just on the code.
+tuhanKami's second voice — a remixed clone speaking fragmented, looping repetitions of each answer through surrounding speakers — is not ported yet. `BackgroundEchoPlayer` and the pitch shift are in `base/tuhanKami/audio.py`, the remix in `base/tuhanKami/tts.py`, and `ask_echo` in `base/tuhanKami/llm.py`.
 
 ## Credits and AI Disclosure
 
 Base code and documentation for the original was written by Anthropic's [Claude](https://claude.ai/). This version was adapted with Claude as well.
 
-This program requires [Gemini](https://aistudio.google.com) to function. As part of our compliance, any stored user data (user audio, user interactions) is deleted after every session.
+This program requires [Claude](https://platform.claude.com), [Gemini](https://aistudio.google.com) and [ElevenLabs](https://elevenlabs.io) to function. As part of our compliance, any stored user data (user audio, user interactions) is deleted after every session.

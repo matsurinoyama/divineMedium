@@ -29,13 +29,12 @@ class Session:
 
     def __init__(self) -> None:
         self.stage = IDLE
-        self.stop = threading.Event()    # 'o' — finish the prayer recording
+        self.tap = threading.Event()     # 'o' — ends the prayer; opens and closes a question
         self.end = threading.Event()     # 'e' — end the session, ask for a farewell
         self.abort = threading.Event()   # 'i'/'p' — drop everything, back to idle
-        self.paused = threading.Event()  # 'o' held — discard the take in progress
 
     def reset(self) -> None:
-        for event in (self.stop, self.end, self.abort, self.paused):
+        for event in (self.tap, self.end, self.abort):
             event.clear()
         self.stage = IDLE
 
@@ -110,7 +109,7 @@ def button_pipe() -> Iterator[None]:
 # after the Session is created. The key loop can stay as it is — both paths set
 # the same events, so they work side by side.
 #
-# BUTTON_ACT_PIN = 17   # short press: begin prayer, then end prayer / pause a take
+# BUTTON_ACT_PIN = 17   # short press: end the prayer / start and finish a question
 # BUTTON_END_PIN = 27   # short press: end the session (omit for a single button)
 # LONG_PRESS_SECS = 1.5
 #
@@ -123,14 +122,13 @@ def button_pipe() -> Iterator[None]:
 #         # A held button is an abort; a tap advances the stage.
 #         if act.held:
 #             return
-#         if session.stage == PRAYER:
-#             session.stop.set()
+#         if session.stage in (PRAYER, DIALOGUE):
+#             session.tap.set()
 #         elif session.stage == IDLE:
 #             session.start_requested.set()   # add this Event to Session if you use it
 #
 #     def on_hold() -> None:
 #         session.abort.set()
-#         session.stop.set()
 #
 #     act.when_released = on_release
 #     act.when_held = on_hold

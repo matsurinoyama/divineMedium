@@ -5,6 +5,8 @@ __pycache__/
 *.pyc
 screen.png
 prayer.wav
+prayer_upload.wav
 question.wav
 debug.wav
 /examples/*
+button.fifo

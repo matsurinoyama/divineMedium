@@ -2,8 +2,12 @@
 google-genai>=1.0
 python-dotenv
 
-# Recording
+# Voice clone and speech
+elevenlabs
+
+# Recording and playback
 numpy
+scipy
 sounddevice
 soundfile
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import select
 import sys
 import termios
@@ -50,10 +51,24 @@ def check(session: Session) -> None:
         raise RitualAborted
 
 
+# PiSugar button taps arrive through this pipe as the same letters the keyboard
+# sends (see pisugar_button.sh). It sits next to the code rather than in /tmp,
+# where fs.protected_fifos stops root from writing to a FIFO the user owns.
+BUTTON_FIFO = os.path.join(os.path.dirname(os.path.abspath(__file__)), "button.fifo")
+_button_fd: int | None = None
+
+
 def read_key(timeout: float = 0.1) -> str | None:
-    # Non-blocking single-keypress read. Returns the character or None if nothing
-    # was pressed. Requires raw_keyboard() to be active.
-    if select.select([sys.stdin], [], [], timeout)[0]:
+    # Non-blocking single-keypress read from the keyboard or the button pipe.
+    # Returns the character or None if nothing was pressed. Requires
+    # raw_keyboard() to be active; the pipe is read only inside button_pipe().
+    sources = [sys.stdin] if _button_fd is None else [sys.stdin, _button_fd]
+    ready = select.select(sources, [], [], timeout)[0]
+    if _button_fd is not None and _button_fd in ready:
+        data = os.read(_button_fd, 1)
+        if data:
+            return data.decode(errors="ignore")
+    if sys.stdin in ready:
         return sys.stdin.read(1)
     return None
 
@@ -68,6 +83,23 @@ def raw_keyboard() -> Iterator[None]:
         yield
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, old)
+
+
+@contextmanager
+def button_pipe() -> Iterator[None]:
+    # Opened read-write so the pipe always has a writer: reads never hit EOF
+    # between taps, and the button script's write never blocks while we run.
+    global _button_fd
+    if os.path.lexists(BUTTON_FIFO):
+        os.remove(BUTTON_FIFO)
+    os.mkfifo(BUTTON_FIFO, 0o600)
+    _button_fd = os.open(BUTTON_FIFO, os.O_RDWR | os.O_NONBLOCK)
+    try:
+        yield
+    finally:
+        os.close(_button_fd)
+        _button_fd = None
+        os.remove(BUTTON_FIFO)
 
 
 # ── GPIO buttons ──────────────────────────────────────────────────────────────

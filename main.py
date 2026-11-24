@@ -5,12 +5,29 @@ import threading
 import time
 
 from dotenv import load_dotenv
+import numpy as np
+from elevenlabs.client import ElevenLabs
 from google import genai
 from google.genai import types
 
+# Before the local imports: gemini, audio and display read their settings from the
+# environment at import time.
+load_dotenv()
+
+import consent
 import gemini
+import tts
 # import plugs                      # smart plugs — see the commented calls below
-from audio import is_silent, record_prayer, record_question
+from audio import (
+    bell_mix,
+    build_voice,
+    compress_for_ivc,
+    is_silent,
+    play,
+    random_bell,
+    record_prayer,
+    record_question,
+)
 from control import (
     DIALOGUE,
     FAREWELL,
@@ -18,43 +35,116 @@ from control import (
     PRAYER,
     RitualAborted,
     Session,
+    button_pipe,
     check,
     raw_keyboard,
     read_key,
 )
-from display import Display
+from display import BACKGROUND, BLACK, BLUE, GOLD, RED, TEXT_COLOR, Display
 from llm import ask_entity
 from prompts import FAREWELL_REQUEST, GREETING_REQUEST
 from stt import transcribe
-
-load_dotenv()
 
 # File paths used during a session
 DEBUG_WAV = "debug.wav"        # if present, skips prayer recording and uses this file
 PRAYER_WAV = "prayer.wav"      # recorded prayer audio
 QUESTION_WAV = "question.wav"  # recorded question audio
+PRAYER_UPLOAD_WAV = "prayer_upload.wav"  # prayer downsampled for the voice clone
 
-# e.g. "ja" to force the entity to always speak Japanese, for presentations
-LANGUAGE_OVERRIDE = os.getenv("LANGUAGE_OVERRIDE") or None
-# Optional single line left on the panel between sessions. Empty = blank panel.
-IDLE_TEXT = os.getenv("IDLE_TEXT", "")
+# (text, background) for the screens that are not answers. The prayer the seeker
+# reads is blue — their words, not the entity's. The greeting arrives in
+# vermilion, the red of shrine gates and seals; the farewell is gold on black.
+# Answers stay black on white, the most legible the panel gets.
+PRAYER_STYLE = (BLUE, BACKGROUND)
+GREETING_STYLE = (RED, BACKGROUND)
+FAREWELL_STYLE = (GOLD, BLACK)
+
+# The language the consent form opens in. The seeker can switch it with a long
+# press, and the language they consent in is the session's language.
+DEFAULT_LANGUAGE = os.getenv("LANGUAGE_OVERRIDE") or consent.DEFAULT_LANGUAGE
 
 
-def run_ritual(client: genai.Client, display: Display, session: Session) -> None:
+def synthesize(eleven: ElevenLabs | None, voice_id: str | None, text: str) -> bytes | None:
+    # The utterance in the cloned voice, or None when there is no voice this session.
+    if eleven is None or voice_id is None:
+        return None
+    try:
+        return tts.speak(eleven, voice_id, text)
+    except Exception as e:
+        print(f"  [voice failed: {type(e).__name__}: {e}]")
+        return None
+
+
+Style = tuple[tuple[int, int, int], tuple[int, int, int]]
+
+
+class Panel:
+    # One panel refresh run in the background, so the ~20 seconds it takes can
+    # overlap with playback or recording. join() re-raises a failed refresh.
+    def __init__(self, display: Display, text: str, style: Style) -> None:
+        self.failure: BaseException | None = None
+        self.thread = threading.Thread(target=self.run, args=(display, text, style), daemon=True)
+        self.thread.start()
+
+    def run(self, display: Display, text: str, style: Style) -> None:
+        try:
+            display.show(text, *style)
+        except BaseException as e:
+            self.failure = e
+
+    def join(self) -> None:
+        self.thread.join()
+        if self.failure is not None:
+            raise self.failure
+
+
+def say(
+    display: Display,
+    text: str,
+    audio: np.ndarray | None,
+    *stops: threading.Event,
+    style: Style = (TEXT_COLOR, BACKGROUND),
+) -> None:
+    # Print and speak one utterance, the panel refresh alongside the playback;
+    # returns when both are done.
+    panel = Panel(display, text, style)
+    if audio is not None:
+        play(audio, *stops)
+    panel.join()
+
+
+def run_ritual(
+    client: genai.Client,
+    eleven: ElevenLabs | None,
+    display: Display,
+    session: Session,
+    language: str,
+) -> None:
     """
     Full ritual flow, from the prayer recording to the farewell.
 
     Stages:
-      1. Prayer — record until 'o', or load debug.wav
+      1. Prayer — a short prayer to read appears on the panel while recording
+         runs until 'o', or debug.wav is loaded instead
       2. Transcription — Gemini → prayer_text
-      3. Greeting — the entity's welcome, drawn from the prayer, printed on the panel
-      4. Dialogue loop — question → answer → one screen, until 'e'
-      5. Farewell — a last screen, then the panel is cleared
+      3. Voice clone — one ElevenLabs IVC voice from the prayer
+      4. Greeting — the entity's welcome, drawn from the prayer, on the panel and
+         spoken over a bell, 3 seconds in
+      5. Dialogue loop — question → answer → one screen and one spoken answer, until 'e'
+      6. Farewell — a last screen and spoken farewell, three bells, then the clone
+         is deleted and the consent form returns
 
-    There is no voice cloning and no playback: the entity is mute here and speaks
-    only in print. One utterance is one full-panel refresh, roughly 20 seconds.
+    One utterance is one full-panel refresh, roughly 20 seconds; the voice plays
+    while the panel draws. Without an ElevenLabs key, or if cloning fails, the
+    session carries on text-only with the bells.
+
+    language is the one the seeker consented in: transcription is told to expect
+    it and the entity answers in it, for the whole session.
     """
     prayer_audio = PRAYER_WAV
+    voice_id: str | None = None
+    bell = random_bell()
+    invitation: Panel | None = None
     try:
         # plugs.entity_travel(False, 1)
         # plugs.entity_travel(True, 2)
@@ -66,6 +156,9 @@ def run_ritual(client: genai.Client, display: Display, session: Session) -> None
             prayer_audio = DEBUG_WAV
         else:
             print("\n  [Prayer recording started. Press 'o' to finish.]\n")
+            # The short prayer replaces the consent form while recording is
+            # already running, so nothing said during the refresh is lost.
+            invitation = Panel(display, consent.PRAYERS[language], PRAYER_STYLE)
             record_prayer(session, PRAYER_WAV)
             check(session)
             if not os.path.exists(PRAYER_WAV) or is_silent(PRAYER_WAV):
@@ -74,22 +167,37 @@ def run_ritual(client: genai.Client, display: Display, session: Session) -> None
 
         print("  [Transcribing...]")
         # plugs.entity_travel(True, 1)
-        prayer_text, prayer_lang = transcribe(client, prayer_audio, language=LANGUAGE_OVERRIDE)
+        prayer_text, prayer_lang = transcribe(client, prayer_audio, language=language)
         check(session)
         if not prayer_text:
             print("  (no speech found in the prayer — returning to idle)\n")
             return
         print(f"  Prayer received. [{prayer_lang}]\n")
 
+        # ── VOICE CLONE ───────────────────────────────────────────────────────
+        if eleven is not None:
+            try:
+                compress_for_ivc(prayer_audio, PRAYER_UPLOAD_WAV)
+                voice_id = tts.clone_voice(eleven, PRAYER_UPLOAD_WAV)
+            except Exception as e:
+                print(f"  [voice clone failed — continuing text-only: {type(e).__name__}: {e}]")
+            check(session)
+
         # ── GREETING ──────────────────────────────────────────────────────────
+        if invitation is not None:
+            invitation.join()   # one refresh at a time on the panel
         session.stage = DIALOGUE
         history: list[types.Content] = []  # running conversation, in Gemini's format
         # plugs.entity_travel(False, 1)
         greeting = ask_entity(client, [], GREETING_REQUEST, prayer_text, language=prayer_lang)
         check(session)
         print(f"\n  They: {greeting}\n")
+        pcm = synthesize(eleven, voice_id, greeting)
+        check(session)
         # plugs.entity_travel(False, 2)
-        display.show(greeting)
+        # The bell tolls once; the greeting rises out of it 3 seconds in
+        say(display, greeting, bell_mix(bell, voice=build_voice(pcm) if pcm else None),
+            session.abort, style=GREETING_STYLE)
         check(session)
         print("\nSpeak your question, or press 'e' to end the ritual.\n")
 
@@ -107,7 +215,7 @@ def run_ritual(client: genai.Client, display: Display, session: Session) -> None
                     os.remove(QUESTION_WAV)
                 continue
 
-            question, q_lang = transcribe(client, QUESTION_WAV, language=LANGUAGE_OVERRIDE)
+            question, q_lang = transcribe(client, QUESTION_WAV, language=language)
             os.remove(QUESTION_WAV)
             check(session)
 
@@ -120,8 +228,11 @@ def run_ritual(client: genai.Client, display: Display, session: Session) -> None
             answer = ask_entity(client, history, question, prayer_text, language=q_lang)
             check(session)
             print(f"\n  They: {answer}\n")
+            pcm = synthesize(eleven, voice_id, answer)
+            check(session)
 
-            display.show(answer)
+            # 'e' cuts the answer short, as a double clap did in tuhanKami
+            say(display, answer, build_voice(pcm) if pcm else None, session.abort, session.end)
             check(session)
 
         # ── FAREWELL ──────────────────────────────────────────────────────────
@@ -131,7 +242,13 @@ def run_ritual(client: genai.Client, display: Display, session: Session) -> None
         farewell = ask_entity(client, history, FAREWELL_REQUEST, prayer_text, language=prayer_lang)
         check(session)
         print(f"\n  They: {farewell}\n")
-        display.show(farewell)
+        pcm = synthesize(eleven, voice_id, farewell)
+        check(session)
+        say(display, farewell, build_voice(pcm) if pcm else None, session.abort,
+            style=FAREWELL_STYLE)
+        check(session)
+        # Three overlapping bells close the ritual
+        play(bell_mix(bell, times=3, overlap_secs_min=5.5, overlap_secs_max=7.0), session.abort)
         # plugs.entity_travel(False, 1)
         # plugs.entity_travel(True, 2)
 
@@ -141,47 +258,49 @@ def run_ritual(client: genai.Client, display: Display, session: Session) -> None
         # A session must never take the installation down with it.
         print(f"\n  [Ritual failed: {type(e).__name__}: {e}]\n")
     finally:
-        # Always clean up — recordings are deleted even if the ritual was interrupted
-        for path in (PRAYER_WAV, QUESTION_WAV):
+        # Let a refresh still in flight finish before main() draws the consent form
+        if invitation is not None:
+            try:
+                invitation.join()
+            except Exception as e:
+                print(f"  [display failed: {e}]")
+        # Always clean up — the clone and the recordings are deleted even if the
+        # ritual was interrupted
+        if eleven is not None and voice_id is not None:
+            tts.delete_voice(eleven, voice_id)
+        for path in (PRAYER_WAV, PRAYER_UPLOAD_WAV, QUESTION_WAV):
             if os.path.exists(path):
                 os.remove(path)
-        try:
-            # One last refresh returns the panel to its resting state, so no
-            # seeker's answer is left on display for the next one to read.
-            if IDLE_TEXT.strip():
-                display.show(IDLE_TEXT)
-            else:
-                display.clear()
-        except Exception as e:
-            print(f"  [display cleanup failed: {e}]")
+        # The panel is not cleared here: main() puts the consent form back up
+        # straight away, so no seeker's answer is left on display for the next one.
         session.stage = IDLE
         print("  [Ritual cleared.]\n")
 
 
 def main() -> None:
-    # Operator event loop: waits for 'o' to unlock, runs a session, repeats.
+    # Event loop: shows the consent form, runs a session once it is given, repeats.
     client = gemini.make_client()
+    eleven = tts.make_client()
     print(f"  [entity: {gemini.MODEL}]")
 
-    with Display() as display, raw_keyboard():
+    language = DEFAULT_LANGUAGE
+    with Display() as display, raw_keyboard(), button_pipe():
         while True:
             print(
-                "\nPress 'o' to begin the ritual...\n"
-                "  o  begin the prayer / end the prayer / hold to pause a question\n"
-                "  e  end the ritual (the entity gives a farewell)\n"
-                "  i  interrupt and reset to idle\n"
+                "\nWaiting for consent...\n"
+                "  e  consent and begin the prayer / end the ritual (farewell)\n"
+                "  i  switch the form between Japanese and English / interrupt and reset\n"
+                "  o  end the prayer / hold to pause a question\n"
+                "  (PiSugar button: tap = o, double tap = e, long press = i)\n"
             )
 
-            while True:
-                if read_key() == "o":
-                    break
-
-            print("  [Ritual unlocked.]\n")
+            language = consent.wait_for_consent(display, language)
+            print(f"  [Consent given — ritual unlocked. ({language})]\n")
 
             session = Session()
             # control.attach_buttons(session)   # GPIO buttons — see control.py
             ritual_thread = threading.Thread(
-                target=run_ritual, args=(client, display, session), daemon=True
+                target=run_ritual, args=(client, eleven, display, session, language), daemon=True
             )
             ritual_thread.start()
 

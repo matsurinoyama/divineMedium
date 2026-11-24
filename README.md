@@ -12,9 +12,10 @@ The original is an audio piece — cloned voices, bells, an echo thrown across s
 | --- | --- | --- |
 | Entity | Claude (`claude-haiku-4-5`) | Gemini (`gemini-flash-latest`) |
 | Transcription | local Whisper `small` | Gemini, same key and model |
-| Output | two cloned voices, bells, echo speakers | one e-paper screen per utterance |
-| Voice cloning | ElevenLabs IVC + remix | removed |
-| Discrete input | double clap, detected on the microphone | keyboard (GPIO buttons ready in `control.py`) |
+| Output | two cloned voices, bells, echo speakers | one e-paper screen per utterance, spoken in the cloned voice over bells |
+| Voice cloning | ElevenLabs IVC + remix | ElevenLabs IVC only — the seeker's own voice, no remix or pitch shift, reverse reverb only; no echo voice yet |
+| Discrete input | double clap, detected on the microphone | PiSugar button or keyboard (GPIO buttons ready in `control.py`) |
+| Consent | — | a consent form on the panel; nothing is recorded until it is given |
 | Smart plugs | driven through the ritual | kept in `plugs.py`, every call commented out |
 | Platform | macOS | Raspberry Pi (the panel is SPI/GPIO) |
 
@@ -22,43 +23,52 @@ The audio input half is unchanged: the same voice-activity detection records a q
 
 ## How It Works
 
-1. **Prayer** — The participant speaks a prayer aloud. The operator presses `o` to begin and `o` again to end it. The entity learns the seeker's concerns from what they offer.
-2. **Arrival** — Gemini transcribes the prayer, and the entity writes a greeting drawn from it. The panel takes about twenty seconds to paint.
-3. **Dialogue** — The participant speaks; the microphone detects speech and stops on silence. The question is transcribed, the entity answers, and the answer replaces the greeting on the panel.
-4. **Departure** — The operator presses `e`. A farewell is printed, then the panel is cleared. The recordings are deleted. No trace remains.
+0. **Consent** — Between sessions the panel shows a consent form, in Japanese. A long press switches it to English (and back); the language the participant consents in is the session's language. A double press gives consent.
+1. **Prayer** — Recording starts as soon as consent is given. The participant speaks a prayer aloud and taps once to end it. The entity learns the seeker's voice and concerns from what they offer.
+2. **Arrival** — Gemini transcribes the prayer and ElevenLabs clones the voice from it. A bell tolls; three seconds in, the entity speaks a greeting drawn from the prayer, in the seeker's own voice, while the panel paints the same words (about twenty seconds).
+3. **Dialogue** — The participant speaks; the microphone detects speech and stops on silence. The question is transcribed, the entity answers, and the answer is spoken and replaces the greeting on the panel.
+4. **Departure** — A double press. The entity speaks and prints a farewell, three bells toll, the voice clone and the recordings are deleted, and the consent form returns. No trace remains.
 
 ### Signal flow
 
 ```
-Operator presses 'o'
+[consent.py] wait_for_consent — the form, until a double press ('e')
        ↓
-  [audio.py]  record_prayer — records until 'o' is pressed again
+  [audio.py]  record_prayer — 44.1 kHz, until a single tap ('o')
        ↓
-  [stt.py]    transcribe — Gemini returns prayer text + language
+  [stt.py]    transcribe — Gemini returns prayer text
+  [tts.py]    clone_voice — ElevenLabs IVC from the prayer
        ↓
   [llm.py]    ask_entity — greeting generated from the prayer
-  [display.py] show — one full-panel refresh (~20 s)
+  [tts.py]    speak — greeting in the cloned voice
+  [audio.py]  bell_mix + play — bell, greeting 3 s in, reverse reverb
+  [display.py] show — one full-panel refresh (~20 s), alongside the voice
        ↓
   ┌─────── Participant speaks a question (auto-detected) ──────────────────┐
   │   [audio.py]   record_question — VAD calibrates, detects onset,       │
   │                records until 1.5 s of silence                         │
   │   [stt.py]     transcribe — question text + language                  │
   │   [llm.py]     ask_entity — answer, capped to one screen              │
-  │   [display.py] show — vertical if Japanese, horizontal if latin       │
+  │   [tts.py]     speak — answer in the cloned voice                     │
+  │   [display.py] show + [audio.py] play — together                      │
   └────────────────────────────────────────────────────────────────────────┘
-       ↓ (operator presses 'e')
-  [llm.py]     ask_entity — farewell
-  [display.py] show, then clear
+       ↓ (double press, 'e')
+  [llm.py]     ask_entity — farewell, spoken and shown
+  [audio.py]   three overlapping bells
+  [tts.py]     delete_voice — the clone is destroyed
 ```
 
 ## File Overview
 
 | File | Purpose |
 | ---- | ------- |
-| `main.py` | Operator event loop and ritual orchestration |
+| `main.py` | Event loop and ritual orchestration |
+| `consent.py` | The consent form (Japanese / English) and the wait for consent |
+| `tts.py` | ElevenLabs: voice cloning, synthesis, deletion |
 | `display.py` | E-paper rendering: fitting, wrapping, horizontal and vertical setting |
-| `audio.py` | Recording only — prayer capture and VAD question capture |
-| `control.py` | `Session` events, the keyboard reader, and the GPIO button block |
+| `audio.py` | Prayer capture, VAD question capture, reverse reverb, bells, playback |
+| `control.py` | `Session` events, the keyboard and button-pipe reader, and the GPIO button block |
+| `pisugar_button.sh` | Forwards PiSugar button taps to `main.py` |
 | `stt.py` | Gemini audio transcription |
 | `llm.py` | Gemini entity responses and length budgeting |
 | `gemini.py` | Shared client, safety settings, retries, thinking-off |
@@ -73,7 +83,9 @@ Operator presses 'o'
 | Raspberry Pi | Runs everything; the panel needs its SPI and GPIO |
 | Waveshare 4inch e-Paper (E) | 400×600, six colours, full refresh only |
 | USB microphone or headset | Captures the prayer and the questions |
-| Keyboard, or SSH | Operator control |
+| Speaker or headset | The entity's voice and the bells |
+| PiSugar battery button | The participant's control: consent, language, end of prayer, farewell |
+| Keyboard, or SSH | Operator control, alongside the button |
 
 The panel has no partial refresh: every update is a full repaint of roughly fifteen to twenty seconds. That constraint shapes the whole piece. One utterance is one screen, the entity's answers are capped to what a screen holds, and nothing is ever painted that is not the entity speaking — no status, no progress, no prompts. Those go to the operator's terminal.
 
@@ -85,11 +97,12 @@ The panel has no partial refresh: every update is a full repaint of roughly fift
 - A Raspberry Pi with SPI enabled (`sudo raspi-config` → Interface Options → SPI)
 - PortAudio (`sudo apt install libportaudio2`, or `brew install portaudio` on macOS)
 - A [Gemini API key](https://aistudio.google.com/apikey)
+- An [ElevenLabs API key](https://elevenlabs.io/app/settings/api-keys) with voice cloning (without one, sessions run text-only with the bells)
 
 ### Setup
 
 ```bash
-python3 -m venv .venv
+python3 -m venv --system-site-packages .venv   # system packages: lgpio for the panel
 source .venv/bin/activate
 pip install -r requirements.txt
 ```
@@ -100,17 +113,18 @@ pip install -r requirements.txt
 
 ```
 GEMINI_API_KEY=your_gemini_key_here
-# GEMINI_MODEL=gemini-flash-latest   # pin an exact id instead of the alias
-# LANGUAGE_OVERRIDE=ja               # force one language for a presentation
-# IDLE_TEXT=祈りなさい                # a line left on the panel between sessions
+ELEVENLABS_API_KEY=your_elevenlabs_key_here
+# GEMINI_MODEL=gemini-3.8-flash      # gemini-flash-latest is not served on the v1 API
+# LANGUAGE_OVERRIDE=en               # the language the consent form opens in (default ja)
 # EPAPER_MOCK=1                      # render to screen.png instead of the panel
 # SPEECH_INPUT=1                     # sounddevice input index for the microphone
+# MAIN_OUTPUT=0                      # sounddevice output index for the voice and bells
 # VERTICAL=auto                      # auto / always / never
 ```
 
 ### Audio device
 
-Leave `SPEECH_INPUT` unset to use the system default. To pick a device:
+Leave `SPEECH_INPUT` and `MAIN_OUTPUT` unset to use the system default. To pick a device:
 
 ```bash
 python -c "import sounddevice as sd; print(sd.query_devices())"
@@ -125,22 +139,33 @@ python3 main.py
 
 ### Session flow for the operator
 
-1. Start `python main.py` before participants arrive.
-2. The terminal shows `Press 'o' to begin the ritual...`
-3. When the participant is ready, press **`o`**. Recording starts immediately.
-4. The participant speaks their prayer. Press **`o`** again to end it.
-5. The greeting appears on the panel. From here the participant speaks freely; each question is detected and answered on its own screen.
-6. Press **`e`** to end the session. A farewell is printed and the panel clears.
-7. Press `Ctrl-C` to stop the program.
+1. Start `python main.py` before participants arrive. The consent form appears on the panel.
+2. The participant may long-press to switch the form to English, then double-presses to consent. Recording starts immediately.
+3. The participant speaks their prayer and taps once to end it.
+4. A bell, then the greeting is spoken and appears on the panel. From here the participant speaks freely; each question is detected, answered aloud and on its own screen.
+5. A double press ends the session: a farewell, three bells, and the consent form returns.
+6. Press `Ctrl-C` to stop the program.
 
 ### Keyboard controls
 
 | Key | Effect |
 | --- | --- |
-| `o` | Begins the ritual; ends the prayer recording; held, pauses a question take |
-| `e` | Ends the ritual — the entity gives a farewell (dialogue stage only) |
-| `i`/`p` | Interrupts and resets to idle at any stage |
+| `e` | On the consent form, consents and begins the prayer; in the dialogue, ends the ritual with a farewell (and cuts short an answer being spoken) |
+| `i`/`p` | On the consent form, switches Japanese / English; otherwise interrupts and returns to the consent form |
+| `o` | Ends the prayer recording; held, pauses a question take |
 | `Ctrl-C` | Exits |
+
+### PiSugar button
+
+`pisugar_button.sh` turns the PiSugar's custom button into the keyboard keys: single tap is `o`, double tap is `e`, long press is `i` — so a long press is the language switch on the consent form and an interrupt everywhere else. pisugar-server runs the command; the script forwards the tap through `button.fifo`, which `main.py` creates while it runs. In the PiSugar web UI (port 8421), enable each tap under the custom button function and set its shell to:
+
+```
+/home/matsurinoyama/divineMedium/pisugar_button.sh single
+/home/matsurinoyama/divineMedium/pisugar_button.sh double
+/home/matsurinoyama/divineMedium/pisugar_button.sh long
+```
+
+There is no hold-to-pause on the button; a single tap during the dialogue discards the question take in progress instead.
 
 ### Buttons
 

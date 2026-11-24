@@ -4,6 +4,7 @@ import os
 import re
 import sys
 import time
+import types
 
 from PIL import Image, ImageDraw, ImageFont
 
@@ -32,10 +33,16 @@ GREEN = (0, 255, 0)
 TEXT_COLOR = BLACK
 BACKGROUND = WHITE
 
+# The panel has no gold; yellow is the nearest colour it can lay down flat.
+GOLD = YELLOW
+
 MARGIN_X = 30
 MARGIN_Y = 40
 LINE_SPACING = 1.38     # multiple of font size, between horizontal lines
 COLUMN_SPACING = 1.5    # multiple of font size, between vertical columns
+# A blank line in the text ("\n\n") is a paragraph break: this fraction of a line
+# (or of a column, set vertically) of extra space instead of a whole empty one.
+PARAGRAPH_GAP = 0.5
 
 # Largest first — layout() walks down this ladder and keeps the biggest size whose
 # text still fits on one screen. The floor is deliberately high: ShinGyoRei is a
@@ -131,7 +138,7 @@ def tokens(text: str) -> list[str]:
 
     Latin runs stay whole so words are never split; each CJK character is its own
     token because Japanese has no spaces to break on. " " is a soft break and
-    "\n" a hard one.
+    "\n" a hard one; two in a row leave an empty line, the paragraph break.
     """
     out: list[str] = []
     buf = ""
@@ -195,6 +202,13 @@ def wrap(text: str, f: ImageFont.FreeTypeFont, max_width: int) -> list[str]:
     return lines
 
 
+def extent(units: list[str], pitch: int) -> int:
+    # Total depth of laid-out lines (or columns): a full pitch for each, and a
+    # paragraph gap for each empty one.
+    gaps = sum(1 for u in units if not u.strip())
+    return int((len(units) - gaps) * pitch + gaps * pitch * PARAGRAPH_GAP)
+
+
 def layout(text: str, path: str | None = None) -> tuple[list[str], ImageFont.FreeTypeFont]:
     """
     Pick the largest font size whose wrapped text fits one screen.
@@ -208,7 +222,7 @@ def layout(text: str, path: str | None = None) -> tuple[list[str], ImageFont.Fre
     for size in FONT_SIZES:
         f = font(size, path)
         lines = wrap(text, f, avail_w)
-        if len(lines) * int(size * LINE_SPACING) <= avail_h:
+        if extent(lines, int(size * LINE_SPACING)) <= avail_h:
             return lines, f
 
     # Overflow: estimate how much text fits at the smallest size and trim to it.
@@ -268,6 +282,8 @@ def wrap_vertical(text: str, f: ImageFont.FreeTypeFont, per_column: int) -> list
         if tok == "\n":
             if cur.strip():
                 columns.append(cur)
+            elif columns and columns[-1]:
+                columns.append("")   # a blank line: the paragraph break
             cur, used = "", 0
             continue
         if tok == " ":
@@ -304,7 +320,7 @@ def layout_vertical(text: str) -> tuple[list[str], ImageFont.FreeTypeFont]:
         f = font(size)
         per_column = max(1, avail_h // size)
         columns = wrap_vertical(text, f, per_column)
-        if len(columns) * int(size * COLUMN_SPACING) <= avail_w:
+        if extent(columns, int(size * COLUMN_SPACING)) <= avail_w:
             return columns, f
 
     size = FONT_SIZES[-1]
@@ -373,8 +389,10 @@ def column_cells(column: str, f: ImageFont.FreeTypeFont) -> list[tuple[str, int]
     return [(tok, cells) for tok, cells in vertical_tokens(column, f) if cells]
 
 
-def render_vertical(text: str, color: tuple[int, int, int]) -> Image.Image:
-    image = Image.new("RGB", (EPD_WIDTH, EPD_HEIGHT), BACKGROUND)
+def render_vertical(
+    text: str, color: tuple[int, int, int], background: tuple[int, int, int] = BACKGROUND
+) -> Image.Image:
+    image = Image.new("RGB", (EPD_WIDTH, EPD_HEIGHT), background)
     columns, f = layout_vertical(text)
     if not columns:
         return image
@@ -384,14 +402,19 @@ def render_vertical(text: str, color: tuple[int, int, int]) -> Image.Image:
     col_w = int(f.size * COLUMN_SPACING)
 
     # Columns are a block centred horizontally; within it they run right to left.
-    block_w = len(columns) * col_w
+    block_w = extent(columns, col_w)
     right_edge = (EPD_WIDTH + block_w) / 2
     # All columns start on the same top line, and the longest one centres the block.
     longest = max(sum(c for _, c in column_cells(col, f)) for col in columns)
     top = (EPD_HEIGHT - longest * cell) / 2
 
-    for index, column in enumerate(columns):
-        center_x = right_edge - (index + 0.5) * col_w
+    x = right_edge
+    for column in columns:
+        if not column.strip():
+            x -= col_w * PARAGRAPH_GAP
+            continue
+        center_x = x - col_w / 2
+        x -= col_w
         y = top
         for token, cells in column_cells(column, f):
             draw_vertical_glyph(image, draw, token, f, center_x, y, cell, cells, color)
@@ -413,24 +436,53 @@ def trim_to_sentence(text: str, keep: int) -> str:
     return cut.rstrip() + "..."
 
 
-def render_text(text: str, color: tuple[int, int, int] = TEXT_COLOR) -> Image.Image:
+def render_text(
+    text: str,
+    color: tuple[int, int, int] = TEXT_COLOR,
+    background: tuple[int, int, int] = BACKGROUND,
+) -> Image.Image:
     # Bare text, centred on a blank panel: Japanese vertical, latin horizontal.
-    # No header, rule or footer.
+    # No header, rule or footer. Both colours should be from the panel's six, or
+    # they come out dithered.
     if not text.strip():
-        return Image.new("RGB", (EPD_WIDTH, EPD_HEIGHT), BACKGROUND)
+        return Image.new("RGB", (EPD_WIDTH, EPD_HEIGHT), background)
     if is_vertical(text):
-        return render_vertical(text, color)
+        return render_vertical(text, color, background)
 
-    image = Image.new("RGB", (EPD_WIDTH, EPD_HEIGHT), BACKGROUND)
+    image = Image.new("RGB", (EPD_WIDTH, EPD_HEIGHT), background)
     lines, f = layout(text, LATIN_FONT_PATH)
     draw = ImageDraw.Draw(image)
     line_h = int(f.size * LINE_SPACING)
-    y = (EPD_HEIGHT - len(lines) * line_h) // 2
+    y = (EPD_HEIGHT - extent(lines, line_h)) // 2
 
     for line in lines:
+        if not line.strip():
+            y += line_h * PARAGRAPH_GAP
+            continue
         draw.text(((EPD_WIDTH - f.getlength(line)) / 2, y), line, font=f, fill=color)
         y += line_h
     return image
+
+
+# The refresh itself (~19.5 s) is the panel's own waveform, stored in its
+# controller; nothing here can shorten it without leaving ghosting behind. What
+# can go is the vendor driver's padding around it: a 200 ms pause after every
+# busy-wait (the busy pin has already said the panel is idle) and a 2 s pause
+# after the deep-sleep command. That one cannot go entirely: the busy pin drops
+# on the sleep command, and gpiozero reports the edge up to ~300 ms later — if
+# the pins are closed first, its callback thread raises at shutdown. Together
+# about 2.5 s of a ~23 s update.
+BUSY_SETTLE_MS = 10      # vendor: 200
+SLEEP_SETTLE_MS = 500    # vendor: 2000; 300 measured clean, 100 not
+
+
+def _read_busy(epd) -> None:
+    # epd4in0e.EPD.ReadBusyH with the settle pause shortened.
+    from waveshare_epd import epdconfig
+
+    while epdconfig.digital_read(epd.busy_pin) == 0:   # 0: busy, 1: idle
+        epdconfig.delay_ms(5)
+    epdconfig.delay_ms(BUSY_SETTLE_MS)
 
 
 class Display:
@@ -453,21 +505,27 @@ class Display:
                 from waveshare_epd import epd4in0e
 
                 self.epd = epd4in0e.EPD()
+                self.epd.ReadBusyH = types.MethodType(_read_busy, self.epd)
             except Exception as e:
                 print(f"  [display: no panel ({e}) — falling back to screen.png]")
                 self.mock = True
 
-    def show(self, text: str, color: tuple[int, int, int] = TEXT_COLOR) -> None:
+    def show(
+        self,
+        text: str,
+        color: tuple[int, int, int] = TEXT_COLOR,
+        background: tuple[int, int, int] = BACKGROUND,
+    ) -> None:
         # Render and push one screen. Blocks for the full refresh, by design:
         # nothing should be recorded while the words are still appearing.
-        image = render_text(text, color)
+        image = render_text(text, color, background)
         if self.mock:
             self._show_mock(image, text)
             return
         started = time.monotonic()
         self.epd.init()
         self.epd.display(self.epd.getbuffer(image))
-        self.epd.sleep()
+        self._sleep()
         print(f"  [displayed in {time.monotonic() - started:.1f}s]")
 
     def clear(self) -> None:
@@ -478,7 +536,16 @@ class Display:
             return
         self.epd.init()
         self.epd.Clear()
-        self.epd.sleep()
+        self._sleep()
+
+    def _sleep(self) -> None:
+        # epd4in0e.EPD.sleep with the settle pause shortened.
+        from waveshare_epd import epdconfig
+
+        self.epd.send_command(0x07)   # DEEP_SLEEP
+        self.epd.send_data(0xA5)
+        epdconfig.delay_ms(SLEEP_SETTLE_MS)
+        epdconfig.module_exit()
 
     def close(self) -> None:
         # Release SPI/GPIO. Safe to call when nothing was ever initialised.

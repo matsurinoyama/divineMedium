@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import os
+import random
 import threading
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 
 from dotenv import load_dotenv
 import anthropic
@@ -16,6 +18,7 @@ load_dotenv()
 
 import consent
 import gemini
+import listen
 import llm
 import tts
 # import plugs                      # smart plugs — see the commented calls below
@@ -42,7 +45,7 @@ from control import (
     read_key,
 )
 from display import BACKGROUND, BLACK, BLUE, GOLD, RED, TEXT_COLOR, WHITE, Display
-from llm import ask_entity, inscribe
+from llm import CHARACTER_COUNTED, ask_entity, inscribe
 from prompts import FAREWELL_REQUEST, GREETING_REQUEST
 from stt import transcribe
 
@@ -51,6 +54,17 @@ DEBUG_WAV = "debug.wav"        # if present, skips prayer recording and uses thi
 PRAYER_WAV = "prayer.wav"      # recorded prayer audio
 QUESTION_WAV = "question.wav"  # recorded question audio
 PRAYER_UPLOAD_WAV = "prayer_upload.wav"  # prayer downsampled for the voice clone
+
+# The entity that already knows: on this share of questions it cuts the seeker
+# off once they have said enough — a number of words (or, in Japanese,
+# characters) drawn afresh each time, so the moment cannot be learned.
+FOREKNOW_CHANCE = 0.35
+FOREKNOW_AT = {False: (7, 14), True: (16, 30)}   # by CHARACTER_COUNTED
+
+
+def said(text: str, language: str) -> int:
+    # How much of a question has been heard: words, or characters where there are no spaces.
+    return len(text.replace(" ", "")) if language in CHARACTER_COUNTED else len(text.split())
 
 # (text, background) for the screens that are not answers. The prayer the seeker
 # reads is blue — their words, not the entity's. The greeting arrives in
@@ -236,23 +250,32 @@ def run_ritual(
         # The prayer screen gives way to the wait, drawn while everything below runs
         transition = Panel(display, consent.RECEIVED[language], TRANSITION_STYLE, after=invitation)
 
-        print("  [Transcribing...]")
+        # ── TRANSCRIPTION AND VOICE CLONE, side by side ───────────────────────
+        def clone() -> str | None:
+            if eleven is None:
+                return None
+            try:
+                compress_for_ivc(prayer_audio, PRAYER_UPLOAD_WAV)
+                return tts.clone_voice(eleven, PRAYER_UPLOAD_WAV)
+            except Exception as e:
+                print(f"  [voice clone failed — continuing text-only: {type(e).__name__}: {e}]")
+                return None
+
         # plugs.entity_travel(True, 1)
-        prayer_text, prayer_lang = transcribe(client, prayer_audio, language=language)
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            cloning = pool.submit(clone)
+            print("  [Transcribing...]")
+            try:
+                prayer_text, prayer_lang = transcribe(client, prayer_audio, language=language)
+            finally:
+                # Waited for even when the prayer turns out empty or the session
+                # ends, so that a clone made for nothing is still deleted below.
+                voice_id = cloning.result()
         check(session)
         if not prayer_text:
             print("  (no speech found in the prayer — returning to idle)\n")
             return
         print(f"  Prayer received. [{prayer_lang}]\n")
-
-        # ── VOICE CLONE ───────────────────────────────────────────────────────
-        if eleven is not None:
-            try:
-                compress_for_ivc(prayer_audio, PRAYER_UPLOAD_WAV)
-                voice_id = tts.clone_voice(eleven, PRAYER_UPLOAD_WAV)
-            except Exception as e:
-                print(f"  [voice clone failed — continuing text-only: {type(e).__name__}: {e}]")
-            check(session)
 
         # ── GREETING ──────────────────────────────────────────────────────────
         session.stage = DIALOGUE
@@ -267,27 +290,45 @@ def run_ritual(
               style=GREETING_STYLE, after=transition,
               bed=bell_mix(bell), voice_offset_secs=3.0)
         check(session)
-        print("\nTap once to ask a question and again when done, or double press to end.\n")
+        print("\nSpeak a question, or double press to end.\n")
 
         # ── DIALOGUE LOOP ─────────────────────────────────────────────────────
         while True:
+            # The question is transcribed live as it is spoken. Now and then the
+            # entity does not wait for the end: once enough has been said, it cuts
+            # in and answers what the seeker was about to ask.
+            live = listen.Listener(eleven, language, context=prayer_text) if eleven is not None else None
+            foreknowing = live is not None and random.random() < FOREKNOW_CHANCE
+            enough = random.randint(*FOREKNOW_AT[language in CHARACTER_COUNTED])
+            cut = False
+
+            def cut_in() -> bool:
+                nonlocal cut
+                cut = said(live.heard, language) >= enough
+                return cut
+
             ended = record_question(
                 session, QUESTION_WAV,
                 on_start=lambda: show_wordless(LISTENING_STYLE),
                 on_end=lambda: show_wordless(HEARD_STYLE),
+                hear=live.send if live is not None else None,
+                cut_in=cut_in if foreknowing else None,
             )
+            if ended or session.abort.is_set():
+                if live is not None:
+                    live.close()
             check(session)
-
             if ended:
                 break
 
-            if not os.path.exists(QUESTION_WAV) or is_silent(QUESTION_WAV):
-                print("  (nothing captured — try again)\n")
-                if os.path.exists(QUESTION_WAV):
-                    os.remove(QUESTION_WAV)
-                continue
-
-            question, q_lang = transcribe(client, QUESTION_WAV, language=language)
+            if cut:
+                question = live.heard
+                live.close()
+            else:
+                question = live.finish() if live is not None else ""
+                if not question and not is_silent(QUESTION_WAV):
+                    # No live transcript (no network, no ElevenLabs): the recording itself
+                    question, _ = transcribe(client, QUESTION_WAV, language=language)
             os.remove(QUESTION_WAV)
             check(session)
 
@@ -295,9 +336,10 @@ def run_ritual(
                 print("  (nothing intelligible — try again)\n")
                 continue
 
-            print(f"  You: {question}")
+            print(f"  You: {question}{'…  [cut in]' if cut else ''}")
             print("  [They speak...]")
-            answer = ask_entity(entity, history, question, prayer_text, language=q_lang)
+            answer = ask_entity(entity, history, question, prayer_text, language=language,
+                                foreknown=cut)
             check(session)
             print(f"\n  They: {answer}\n")
             # 'e' cuts the answer short, as a double clap did in tuhanKami
@@ -371,7 +413,7 @@ def main() -> None:
                 "\nWaiting for consent...\n"
                 "  e  consent and begin the prayer / end the ritual (farewell)\n"
                 "  i  switch the form between Japanese and English / interrupt and reset\n"
-                "  o  end the prayer / start and finish a question\n"
+                "  o  end the prayer\n"
                 "  (PiSugar button: tap = o, double tap = e, long press = i)\n"
             )
 
@@ -414,8 +456,8 @@ def watch(session: Session, ritual_thread: threading.Thread) -> None:
                 session.end.set()
             else:
                 print("\n  ['e' only ends the ritual during the dialogue.]\n")
-        elif key == "o" and session.stage in (PRAYER, DIALOGUE):
-            # Ends the prayer; in the dialogue, opens and closes a question
+        elif key == "o" and session.stage == PRAYER:
+            # Ends the prayer (questions are found by speech detection)
             session.tap.set()
 
 

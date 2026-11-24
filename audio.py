@@ -26,6 +26,14 @@ PRAYER_SAMPLE_RATE = 44100
 # bells, which are resampled to it.
 PLAYBACK_RATE = 24000
 
+# Speech detection for questions, as in tuhanKami: calibrate to the room, wait
+# for speech to begin, record until it has paused long enough.
+VAD_CAL_CHUNKS = 20     # ~1 second of ambient noise to calibrate the threshold
+VAD_MULTIPLIER = 2      # speech threshold = ambient RMS × this
+VAD_ONSET_CHUNKS = 2    # consecutive loud chunks required before recording starts
+VAD_SILENCE_SECS = 1.5  # seconds of silence that ends the recording
+VAD_PREROLL_CHUNKS = 6  # ~0.3 s kept from before the onset, so a soft first syllable is not lost
+
 # Input device for prayer and question recording. None = system default; on a Pi
 # with a USB microphone this is usually right without touching it.
 _speech_input = os.getenv("SPEECH_INPUT")
@@ -97,30 +105,87 @@ def record_question(
     filename: str,
     on_start: Callable[[], None] | None = None,
     on_end: Callable[[], None] | None = None,
+    hear: Callable[[bytes], None] | None = None,
+    cut_in: Callable[[], bool] | None = None,
 ) -> bool:
     """
-    One question, controlled by the button: wait for a tap, record until the next.
-    Returns True if the seeker ended the session (a double press) instead — while
-    waiting, or mid-question, in which case the unfinished question is dropped.
+    Record one question by speech detection. Returns True if the seeker ended the
+    session (a double press) instead, while waiting or mid-question.
 
-    A tap made while the entity was still answering is kept and opens the
-    question straight away: that seeker is ready to speak.
+      1. Calibrate the room's noise level over VAD_CAL_CHUNKS (≈1 second).
+      2. Wait for VAD_ONSET_CHUNKS consecutive loud chunks (prevents false triggers).
+      3. Record until VAD_SILENCE_SECS of consecutive quiet chunks — or until
+         cut_in() says the entity will not wait for the rest.
+      4. Save what was recorded to filename.
 
-    on_start and on_end are called at the opening and the closing tap.
+    on_start and on_end are called as speech begins and as the question is taken.
+    hear, if given, receives every recorded chunk as 16-bit PCM as it is captured,
+    for live transcription; cut_in is asked after each one.
     """
-    print("  [Waiting — tap once to ask, again when done]")
-    while not session.tap.is_set():
-        if session.end.is_set() or session.abort.is_set():
-            return session.end.is_set()
-        time.sleep(0.05)
+    CHUNK_SIZE = int(SAMPLE_RATE * 0.05)
+    SILENCE_CHUNKS = int(VAD_SILENCE_SECS / 0.05)
 
-    print("  [Recording question...]")
-    if on_start is not None:
-        on_start()
-    if not record_until_tap(session, filename, SAMPLE_RATE, session.end, session.abort):
-        return session.end.is_set()
+    q: queue.Queue = queue.Queue()
+    chunks: list[np.ndarray] = []
+    preroll: list[np.ndarray] = []
+    cal_rms: list[float] = []
+    speech_started = False
+    onset_count = 0
+    silence_count = 0
+    vad_threshold = 0.001
+
+    def callback(indata, _frames, _t, _status):
+        q.put(indata.copy())
+
+    def take(chunk: np.ndarray) -> None:
+        chunks.append(chunk)
+        if hear is not None:
+            hear((np.clip(chunk, -1.0, 1.0) * 32767).astype("<i2").tobytes())
+
+    print("  [Listening...]")
+    with sd.InputStream(samplerate=SAMPLE_RATE, device=SPEECH_INPUT, channels=1,
+                        dtype="float32", blocksize=CHUNK_SIZE, callback=callback):
+        while True:
+            if session.end.is_set() or session.abort.is_set():
+                return session.end.is_set()
+
+            try:
+                chunk = q.get(timeout=0.1)
+            except queue.Empty:
+                continue
+
+            # Phase 1: calibrate noise floor
+            if len(cal_rms) < VAD_CAL_CHUNKS:
+                cal_rms.append(float(np.sqrt(np.mean(chunk ** 2))))
+                if len(cal_rms) == VAD_CAL_CHUNKS:
+                    vad_threshold = max(float(np.mean(cal_rms)) * VAD_MULTIPLIER, 0.001)
+                continue
+
+            rms = float(np.sqrt(np.mean(chunk ** 2)))
+            if not speech_started:
+                # Phase 2: wait for onset (avoids triggering on transient noise)
+                preroll = (preroll + [chunk])[-VAD_PREROLL_CHUNKS:]
+                onset_count = onset_count + 1 if rms > vad_threshold else 0
+                if onset_count >= VAD_ONSET_CHUNKS:
+                    speech_started = True
+                    print("  [Speaking...]")
+                    if on_start is not None:
+                        on_start()
+                    for c in preroll:
+                        take(c)
+            else:
+                # Phase 3: record until sustained silence, or until the entity cuts in
+                take(chunk)
+                silence_count = 0 if rms > vad_threshold else silence_count + 1
+                if silence_count >= SILENCE_CHUNKS:
+                    break
+                if cut_in is not None and cut_in():
+                    print("  [The entity does not wait for the rest.]")
+                    break
+
     if on_end is not None:
         on_end()
+    sf.write(filename, np.concatenate(chunks, axis=0), SAMPLE_RATE, subtype="PCM_16")
     return False
 
 

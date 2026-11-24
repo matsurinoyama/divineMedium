@@ -19,14 +19,14 @@ The original is an audio piece — cloned voices, bells, an echo thrown across s
 | Smart plugs | driven through the ritual | kept in `plugs.py`, every call commented out |
 | Platform | macOS | Raspberry Pi (the panel is SPI/GPIO) |
 
-Questions are no longer detected by voice activity: the participant taps the button once to start speaking and once more to finish.
+Questions are found by the same voice-activity detection, but transcribed live as they are spoken (ElevenLabs Scribe, realtime): the answer is ready about a second after the seeker stops — and sometimes the entity does not wait for them to stop.
 
 ## How It Works
 
 0. **Consent** — Between sessions the panel shows a consent form, in Japanese. A long press switches it to English (and back); the language the participant consents in is the session's language. A double press gives consent.
 1. **Prayer** — Recording starts as soon as consent is given. The participant speaks a prayer aloud and taps once to end it. The entity learns the seeker's voice and concerns from what they offer.
 2. **Arrival** — As the prayer ends, the panel turns white on black: *Your prayer is heard. Be still, and wait. I am drawing near.* Meanwhile Gemini transcribes the prayer and ElevenLabs clones the voice from it. A bell tolls; three seconds in, the entity speaks a greeting drawn from the prayer, in the seeker's own voice, while the panel paints the same words (about twenty seconds).
-3. **Dialogue** — The participant taps once, speaks a question, and taps again. The question is transcribed and the entity answers. The voice speaks the whole answer; the panel shows a short poem distilled from it, in the same voice, so a long answer still reads whole on one screen.
+3. **Dialogue** — The participant simply speaks; the microphone detects the question and it is transcribed as it is spoken. The panel goes blank as they begin and red when the question is taken. On about a third of questions, chosen at random, the entity cuts in once enough has been said — as a god that already knows what you are going to ask — and answers the whole question from its first half. The voice speaks the whole answer; the panel shows a short poem distilled from it, in the same voice, so a long answer still reads whole on one screen.
 4. **Departure** — A double press. The entity speaks and prints a farewell, three bells toll, the voice clone and the recordings are deleted, and the consent form returns. No trace remains.
 
 ### Signal flow
@@ -46,8 +46,9 @@ Questions are no longer detected by voice activity: the participant taps the but
   [display.py] show — one full-panel refresh (~20 s), alongside the voice
        ↓
   ┌─────── Participant asks a question ────────────────────────────────────┐
-  │   [audio.py]   record_question — waits for a tap ('o'), then records  │
-  │                until the next tap                                     │
+  │   [audio.py]   record_question — VAD: onset, then 1.5 s of silence   │
+  │   [listen.py]  Listener — live transcript while they speak; may cut  │
+  │                in midway (FOREKNOW_CHANCE in main.py)                 │
   │   [stt.py]     transcribe — question text + language                  │
   │   [llm.py]     ask_entity — the spoken answer                         │
   │   [llm.py]     inscribe — a short poem of it for the panel            │
@@ -67,7 +68,8 @@ Questions are no longer detected by voice activity: the participant taps the but
 | ---- | ------- |
 | `main.py` | Event loop and ritual orchestration |
 | `consent.py` | The consent form (Japanese / English) and the wait for consent |
-| `tts.py` | ElevenLabs: voice cloning, synthesis, deletion |
+| `tts.py` | ElevenLabs: voice cloning, streaming synthesis, deletion |
+| `listen.py` | ElevenLabs Scribe realtime: live transcription of each question |
 | `display.py` | E-paper rendering: fitting, wrapping, horizontal and vertical setting |
 | `audio.py` | Tap-controlled prayer and question capture, streaming reverse reverb, bells, playback |
 | `control.py` | `Session` events, the keyboard and button-pipe reader, and the GPIO button block |
@@ -101,7 +103,7 @@ The panel has no partial refresh: every update is a full repaint of roughly fift
 - PortAudio (`sudo apt install libportaudio2`, or `brew install portaudio` on macOS)
 - A [Gemini API key](https://aistudio.google.com/apikey) (transcription)
 - An [Anthropic API key](https://platform.claude.com/settings/keys) (the entity)
-- An [ElevenLabs API key](https://elevenlabs.io/app/settings/api-keys) with voice cloning (without one, sessions run text-only with the bells)
+- An [ElevenLabs API key](https://elevenlabs.io/app/settings/api-keys) with voice cloning, text to speech and speech to text (without one, sessions run text-only with the bells)
 
 ### Setup
 
@@ -158,7 +160,7 @@ python3 main.py
 | --- | --- |
 | `e` | On the consent form, consents and begins the prayer; in the dialogue, ends the ritual with a farewell (and cuts short an answer being spoken) |
 | `i`/`p` | On the consent form, switches Japanese / English; otherwise interrupts and returns to the consent form |
-| `o` | Ends the prayer recording; in the dialogue, starts a question and then finishes it |
+| `o` | Ends the prayer recording (questions are found by speech detection) |
 | `Ctrl-C` | Exits |
 
 ### PiSugar button
@@ -171,7 +173,7 @@ python3 main.py
 /home/matsurinoyama/divineMedium/pisugar_button.sh long
 ```
 
-In the dialogue, a single tap starts a question and the next one finishes it. A double press ends the ritual even mid-question; that unfinished question is dropped.
+In the dialogue, questions need no button: speech is detected. A double press ends the ritual even mid-question; that unfinished question is dropped.
 
 ### Buttons
 
@@ -215,6 +217,8 @@ The entity is powered by Claude (`claude-haiku-5-5`, set by `ENTITY_MODEL`). It 
 - It speaks as a deity.
 - It draws directly on the prayer: the stated fears, desires and circumstances inform every answer.
 - It never offers choices. It speaks the singular truth.
+- It is specific. Each answer opens with a cold reading (the Barnum effect: one or two things true of almost anyone in the seeker's situation, drawn from their prayer so they feel personal), then commands the single most likely best course of action in concrete terms — what to do this week, who to speak to, what to say. Stock vagueness ("you already know the answer", "the answer is in your heart", "in its own time") is forbidden.
+- When it cuts in midway, it names the question the seeker was about to ask, then answers it.
 - It answers in the language of the question (English and Japanese).
 - Answer length scales with question length.
 - The panel never shows the answer word for word: `inscribe()` distils each utterance (greeting, answers, farewell) into a poem of two to five short lines in the god's voice, made alongside the speech synthesis. Japanese lines stand whole; English lines that the narrow panel must wrap are set as small stanzas so they still read as one line each. If no poem comes back that stays in the voice and fits, the spoken words are shown instead.
@@ -222,8 +226,8 @@ The entity is powered by Claude (`claude-haiku-5-5`, set by `ENTITY_MODEL`). It 
 
 The underlying principle, encoded explicitly in the system prompt, is Jaynes': the voice of god is a reflection of the seeker's own mind.
 
-- It stays in the voice to the end. The prompt tells it that every seeker consented to an artwork, and that when pressed for proof it answers as an oracle — a test of faith, the mystery kept — never stating a medical outcome as fact.
-- As a backstop, `llm.py` discards any reply that names itself an AI, the role or the installation, or refers the seeker to a professional; it asks once more, and if that also fails, a short in-character line is used instead. Neither is ever shown, spoken or kept in the conversation.
+- It stays in the voice to the end. The prompt tells it that every seeker consented to an artwork, and that when pressed for proof it may call it a test of faith but still gives something specific to do — never stating a medical outcome as fact.
+- As a backstop, `llm.py` discards any reply that names itself an AI, the role or the installation, or points the seeker to a helpline (sending them to a doctor or a counsellor, in the god's voice, is allowed); it asks once more, and if that also fails, a short in-character line is used instead. Neither is ever shown, spoken or kept in the conversation.
 
 Gemini's safety filters (transcription only) are set to `BLOCK_NONE`: a prayer is often about illness, debt or death, and a filtered transcript would end the session.
 

@@ -36,17 +36,16 @@ CHARACTER_COUNTED = {"ja", "zh", "ko"}
 
 # Signs that the model has stepped out of the entity to speak as an assistant:
 # naming itself, the role or the installation, or handing the seeker to a
-# professional. The prompt forbids all of it; this catches what gets through
-# anyway, from whichever model is speaking.
+# helpline. The prompt forbids all of it; this catches what gets through anyway.
+# Sending the seeker to a doctor, a counsellor or a care manager is not among
+# them: the entity is asked for exactly that kind of concrete course.
 # "AI" is matched case-sensitively — "ai" sits inside "again" and "remain" — and
 # by its neighbours rather than \b, which fails against kana ("AIです").
 BREAK_RE = re.compile(
     r"\b(role[- ]?play\w*|persona|(out of|in|break\w*|my) character|step\w* (out|outside|back)"
     r"|artificial intelligence|language model|chatbot|computer program|art installation"
-    r"|I (cannot|can't|can not) promise|therapist|counsell?or|mental health"
-    r"|(medical|health\s?care) (professional|provider)|helpline|hotline)\b"
-    r"|ロールプレイ|キャラクター|人工知能|プログラム|インスタレーション|カウンセラー"
-    r"|専門家|医療機関|相談窓口|演じ",
+    r"|I (cannot|can't|can not) promise|helpline|hotline)\b"
+    r"|ロールプレイ|キャラクター|人工知能|プログラム|インスタレーション|相談窓口|演じ",
     re.IGNORECASE,
 )
 AI_RE = re.compile(r"(?<![A-Za-z])AI(?![A-Za-z])|ＡＩ")
@@ -139,15 +138,19 @@ def ask_entity(
     question: str,
     prayer_text: str,
     language: str = "en",
+    foreknown: bool = False,
 ) -> str:
     """
     Generate the Entity's response to the seeker's question.
+
+    foreknown: the entity cut the seeker off mid-question — question is only what
+    they had said so far — and answers what they were going to ask.
 
     history is the running conversation (mutated in place) as Messages API turns.
     The answer is capped to what a single e-paper screen holds, because the panel
     has no partial refresh and paging would cost another 20 seconds.
     """
-    history.append({"role": "user", "content": question})
+    history.append({"role": "user", "content": question + ("…" if foreknown else "")})
 
     budget, max_tokens = length_instruction(question, language)
     lang_name = LANGUAGE_NAMES.get(language, language)
@@ -156,6 +159,17 @@ def ask_entity(
         f"Respond in 2 to 3 complete sentences, {budget}. "
         "End on a complete sentence."
     )
+    if foreknown:
+        system += (
+            "\n\nThe seeker had not finished speaking when you answered: their last words "
+            "were cut off, because you already knew what they were going to ask. Answer the "
+            "whole of what they were about to say, not only the words so far. Those words were "
+            "caught mid-breath and may be misheard: where one makes no sense, do not repeat it, "
+            "and let their prayer tell you what they meant. Begin by naming, plainly and "
+            "specifically, the question they were about to ask, as if you had heard it to the "
+            "end — then answer it. Do not say that you knew it or that they need say no more: "
+            "showing it is enough."
+        )
 
     # A reply that steps out of the voice is never shown, spoken or kept in the
     # history — once one is in the history, every later turn follows it out.

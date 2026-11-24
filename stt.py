@@ -4,6 +4,9 @@ import json
 import os
 import re
 
+import numpy as np
+import soundfile as sf
+
 from google import genai
 from google.genai import types
 
@@ -78,7 +81,22 @@ def transcribe(
     )
 
     text, detected = parse(raw)
+    if not text:
+        diagnose(wav_path, raw)
+        if language:
+            # A wrong hint (a seeker who consented in Japanese but prays in
+            # English) can make Gemini return nothing; listen once more without it.
+            print("  [stt: nothing heard — trying again without the language hint]")
+            return transcribe(client, wav_path, language=None)
     return text, (language or detected)
+
+
+def diagnose(wav_path: str, raw: str) -> None:
+    # Why a transcript came back empty: too little captured, or Gemini's answer.
+    data, rate = sf.read(wav_path)
+    level = float(np.sqrt(np.mean(np.square(data)))) if len(data) else 0.0
+    print(f"  [stt: empty transcript — recording {len(data) / rate:.1f}s, "
+          f"level {level:.4f} rms, Gemini returned {raw[:160]!r}]")
 
 
 def parse(raw: str) -> tuple[str, str]:

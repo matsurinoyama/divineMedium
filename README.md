@@ -26,7 +26,7 @@ Questions are no longer detected by voice activity: the participant taps the but
 0. **Consent** — Between sessions the panel shows a consent form, in Japanese. A long press switches it to English (and back); the language the participant consents in is the session's language. A double press gives consent.
 1. **Prayer** — Recording starts as soon as consent is given. The participant speaks a prayer aloud and taps once to end it. The entity learns the seeker's voice and concerns from what they offer.
 2. **Arrival** — As the prayer ends, the panel turns white on black: *Your prayer is heard. Be still, and wait. I am drawing near.* Meanwhile Gemini transcribes the prayer and ElevenLabs clones the voice from it. A bell tolls; three seconds in, the entity speaks a greeting drawn from the prayer, in the seeker's own voice, while the panel paints the same words (about twenty seconds).
-3. **Dialogue** — The participant taps once, speaks a question, and taps again. The question is transcribed, the entity answers, and the answer is spoken and replaces the greeting on the panel.
+3. **Dialogue** — The participant taps once, speaks a question, and taps again. The question is transcribed and the entity answers. The voice speaks the whole answer; the panel shows a short poem distilled from it, in the same voice, so a long answer still reads whole on one screen.
 4. **Departure** — A double press. The entity speaks and prints a farewell, three bells toll, the voice clone and the recordings are deleted, and the consent form returns. No trace remains.
 
 ### Signal flow
@@ -40,17 +40,20 @@ Questions are no longer detected by voice activity: the participant taps the but
   [tts.py]    clone_voice — ElevenLabs IVC from the prayer
        ↓
   [llm.py]    ask_entity — greeting generated from the prayer
-  [tts.py]    speak — greeting in the cloned voice
-  [audio.py]  bell_mix + play — bell, greeting 3 s in, reverse reverb
+  [tts.py]    speak_stream — greeting in the cloned voice, as it is made
+  [audio.py]  play_stream — bell at once, the voice streaming in 3 s later,
+              through the reverse reverb
   [display.py] show — one full-panel refresh (~20 s), alongside the voice
        ↓
   ┌─────── Participant asks a question ────────────────────────────────────┐
   │   [audio.py]   record_question — waits for a tap ('o'), then records  │
   │                until the next tap                                     │
   │   [stt.py]     transcribe — question text + language                  │
-  │   [llm.py]     ask_entity — answer, capped to one screen              │
+  │   [llm.py]     ask_entity — the spoken answer                         │
+  │   [llm.py]     inscribe — a short poem of it for the panel            │
   │   [tts.py]     speak — answer in the cloned voice                     │
-  │   [display.py] show + [audio.py] play — together                      │
+  │   [audio.py]   play_stream — the voice, ~2 s after the text exists   │
+  │   [display.py] show — the poem, as soon as it is written             │
   └────────────────────────────────────────────────────────────────────────┘
        ↓ (double press, 'e')
   [llm.py]     ask_entity — farewell, spoken and shown
@@ -66,7 +69,7 @@ Questions are no longer detected by voice activity: the participant taps the but
 | `consent.py` | The consent form (Japanese / English) and the wait for consent |
 | `tts.py` | ElevenLabs: voice cloning, synthesis, deletion |
 | `display.py` | E-paper rendering: fitting, wrapping, horizontal and vertical setting |
-| `audio.py` | Tap-controlled prayer and question capture, reverse reverb, bells, playback |
+| `audio.py` | Tap-controlled prayer and question capture, streaming reverse reverb, bells, playback |
 | `control.py` | `Session` events, the keyboard and button-pipe reader, and the GPIO button block |
 | `pisugar_button.sh` | Forwards PiSugar button taps to `main.py` |
 | `stt.py` | Gemini audio transcription |
@@ -213,7 +216,8 @@ The entity is powered by Claude (`claude-haiku-5-5`, set by `ENTITY_MODEL`). It 
 - It draws directly on the prayer: the stated fears, desires and circumstances inform every answer.
 - It never offers choices. It speaks the singular truth.
 - It answers in the language of the question (English and Japanese).
-- Answer length scales with question length, capped at what one screen holds.
+- Answer length scales with question length.
+- The panel never shows the answer word for word: `inscribe()` distils each utterance (greeting, answers, farewell) into a poem of two to five short lines in the god's voice, made alongside the speech synthesis. Japanese lines stand whole; English lines that the narrow panel must wrap are set as small stanzas so they still read as one line each. If no poem comes back that stays in the voice and fits, the spoken words are shown instead.
 - When a situation seems hopeless, it may give prophecy.
 
 The underlying principle, encoded explicitly in the system prompt, is Jaynes': the voice of god is a reflection of the seeker's own mind.
@@ -231,4 +235,4 @@ tuhanKami's second voice — a remixed clone speaking fragmented, looping repeti
 
 Base code and documentation for the original was written by Anthropic's [Claude](https://claude.ai/). This version was adapted with Claude as well.
 
-This program requires [Claude](https://platform.claude.com), [Gemini](https://aistudio.google.com) and [ElevenLabs](https://elevenlabs.io) to function. As part of our compliance, any stored user data (user audio, user interactions) is deleted after every session.
+This program requires [Claude](https://platform.claude.com), [Gemini](https://aistudio.google.com) and [ElevenLabs](https://elevenlabs.io) to function. As part of our compliance, any stored user data (user audio, user interactions) is deleted after every session. Quitting with `Ctrl-C` mid-session clears the session first; a voice clone that a crash or power cut kept from being deleted is deleted the next time the program starts.

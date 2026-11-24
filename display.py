@@ -209,9 +209,31 @@ def extent(units: list[str], pitch: int) -> int:
     return int((len(units) - gaps) * pitch + gaps * pitch * PARAGRAPH_GAP)
 
 
+def hard_lines(text: str) -> int:
+    # Lines (or columns) the text asks for itself, blank paragraph breaks included.
+    return text.count("\n") + 1
+
+
+# Verse is kept unwrapped only down to this size; below it, a larger size with a
+# wrapped line reads better than small unbroken lines.
+UNBROKEN_MIN_SIZE = 35
+
+
+def unbroken_passes(text: str) -> tuple[bool, ...]:
+    # Verse is first fitted without wrapping any of its lines; prose never is.
+    return (True, False) if hard_lines(text) > 1 else (False,)
+
+
+def sizes(unbroken: bool) -> list[int]:
+    return [s for s in FONT_SIZES if s >= UNBROKEN_MIN_SIZE] if unbroken else FONT_SIZES
+
+
 def layout(text: str, path: str | None = None) -> tuple[list[str], ImageFont.FreeTypeFont]:
     """
     Pick the largest font size whose wrapped text fits one screen.
+
+    Text with line breaks of its own (verse) is first tried at sizes where none
+    of its lines has to wrap, so a line of a poem is never split in two.
 
     Returns (lines, font). If even the smallest size overflows, the text is
     trimmed at a sentence boundary and re-laid out at that size.
@@ -219,11 +241,14 @@ def layout(text: str, path: str | None = None) -> tuple[list[str], ImageFont.Fre
     avail_w = EPD_WIDTH - 2 * MARGIN_X
     avail_h = EPD_HEIGHT - 2 * MARGIN_Y
 
-    for size in FONT_SIZES:
-        f = font(size, path)
-        lines = wrap(text, f, avail_w)
-        if extent(lines, int(size * LINE_SPACING)) <= avail_h:
-            return lines, f
+    for unbroken in unbroken_passes(text):
+        for size in sizes(unbroken):
+            f = font(size, path)
+            lines = wrap(text, f, avail_w)
+            if extent(lines, int(size * LINE_SPACING)) <= avail_h and (
+                not unbroken or len(lines) == hard_lines(text)
+            ):
+                return lines, f
 
     # Overflow: estimate how much text fits at the smallest size and trim to it.
     size = FONT_SIZES[-1]
@@ -316,12 +341,15 @@ def layout_vertical(text: str) -> tuple[list[str], ImageFont.FreeTypeFont]:
     avail_w = EPD_WIDTH - 2 * MARGIN_X
     avail_h = EPD_HEIGHT - 2 * MARGIN_Y
 
-    for size in FONT_SIZES:
-        f = font(size)
-        per_column = max(1, avail_h // size)
-        columns = wrap_vertical(text, f, per_column)
-        if extent(columns, int(size * COLUMN_SPACING)) <= avail_w:
-            return columns, f
+    for unbroken in unbroken_passes(text):
+        for size in sizes(unbroken):
+            f = font(size)
+            per_column = max(1, avail_h // size)
+            columns = wrap_vertical(text, f, per_column)
+            if extent(columns, int(size * COLUMN_SPACING)) <= avail_w and (
+                not unbroken or len(columns) == hard_lines(text)
+            ):
+                return columns, f
 
     size = FONT_SIZES[-1]
     f = font(size)
@@ -434,6 +462,34 @@ def trim_to_sentence(text: str, keep: int) -> str:
         if idx > keep // 3:
             return cut[: idx + len(mark)].strip()
     return cut.rstrip() + "..."
+
+
+def too_wide(text: str) -> list[str]:
+    # The lines of text that would have to wrap even at UNBROKEN_MIN_SIZE: the
+    # ones that keep verse from being set whole.
+    vertical = is_vertical(text)
+    f = font(UNBROKEN_MIN_SIZE, None if vertical else LATIN_FONT_PATH)
+    if not vertical:
+        width = EPD_WIDTH - 2 * MARGIN_X
+        return [line for line in text.splitlines() if f.getlength(line) > width]
+    per_column = (EPD_HEIGHT - 2 * MARGIN_Y) // UNBROKEN_MIN_SIZE
+    return [
+        line for line in text.splitlines()
+        # closing punctuation may hang below the column, as in wrap_vertical
+        if sum(c for _, c in vertical_tokens(line, f))
+        > per_column + (1 if line and line[-1] in NO_LINE_START else 0)
+    ]
+
+
+def fits(text: str) -> bool:
+    # True when the whole text fits one screen, at whatever size, with nothing trimmed.
+    if is_vertical(text):
+        units, _ = layout_vertical(text)
+        shown = "".join(units)
+    else:
+        units, _ = layout(text, LATIN_FONT_PATH)
+        shown = " ".join(units)
+    return "".join(shown.split()) == "".join(text.split())
 
 
 def render_text(

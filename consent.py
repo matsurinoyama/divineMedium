@@ -69,6 +69,14 @@ RECEIVED = {
     "en": "Your prayer is heard.\n\nBe still, and wait.\nI am drawing near.",
 }
 
+# Shown when a session cannot go on (the network gone for longer than the
+# retries wait, a service down): the entity withdraws rather than the panel
+# simply returning to the consent form, which reads as a fault.
+FAILED = {
+    "ja": "今は、声が届かぬ。\n\n時を置いて、\nまた来なさい。",
+    "en": "The way is clouded.\n\nCome again,\nin a little while.",
+}
+
 DEFAULT_LANGUAGE = "ja"
 
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import threading
+from collections.abc import Iterator
 
 from dotenv import load_dotenv
 import anthropic
@@ -20,10 +21,10 @@ import tts
 # import plugs                      # smart plugs — see the commented calls below
 from audio import (
     bell_mix,
-    build_voice,
     compress_for_ivc,
     is_silent,
     play,
+    play_stream,
     random_bell,
     record_prayer,
     record_question,
@@ -41,7 +42,7 @@ from control import (
     read_key,
 )
 from display import BACKGROUND, BLACK, BLUE, GOLD, RED, TEXT_COLOR, WHITE, Display
-from llm import ask_entity
+from llm import ask_entity, inscribe
 from prompts import FAREWELL_REQUEST, GREETING_REQUEST
 from stt import transcribe
 
@@ -59,6 +60,10 @@ PRAYER_STYLE = (BLUE, BACKGROUND)
 # The wait between the prayer and the greeting: white on black, the dark before
 # the voice arrives.
 TRANSITION_STYLE = (WHITE, BLACK)
+# A question, without words: the panel goes blank while the seeker speaks, and
+# turns red the moment their question is taken.
+LISTENING_STYLE = (TEXT_COLOR, WHITE)
+HEARD_STYLE = (TEXT_COLOR, RED)
 GREETING_STYLE = (RED, BACKGROUND)
 FAREWELL_STYLE = (GOLD, BLACK)
 
@@ -67,36 +72,55 @@ FAREWELL_STYLE = (GOLD, BLACK)
 DEFAULT_LANGUAGE = os.getenv("LANGUAGE_OVERRIDE") or consent.DEFAULT_LANGUAGE
 
 
-def synthesize(eleven: ElevenLabs | None, voice_id: str | None, text: str) -> bytes | None:
-    # The utterance in the cloned voice, or None when there is no voice this session.
+def speech(eleven: ElevenLabs | None, voice_id: str | None, text: str) -> Iterator[bytes] | None:
+    # The utterance as it streams in the cloned voice, or None when there is no
+    # voice this session.
     if eleven is None or voice_id is None:
         return None
-    try:
-        return tts.speak(eleven, voice_id, text)
-    except Exception as e:
-        print(f"  [voice failed: {type(e).__name__}: {e}]")
-        return None
+    return tts.speak_stream(eleven, voice_id, text)
 
 
 Style = tuple[tuple[int, int, int], tuple[int, int, int]]
 
 
 class Panel:
-    # One panel refresh run in the background, so the ~20 seconds it takes can
-    # overlap with playback or recording. join() re-raises a failed refresh.
-    # after: a refresh still in flight that this one must wait its turn behind.
+    """
+    One panel refresh run in the background, so the ~20 seconds it takes can
+    overlap with playback or recording. join() re-raises a failed refresh.
+
+    after: the screen before this one. This one waits its turn behind it, and —
+    since a refresh cannot be stopped once it has begun — if that screen has not
+    yet begun drawing, it never will: a screen that is already out of date (the
+    red of a question whose answer is ready) is skipped rather than shown late.
+    """
+
     def __init__(
         self, display: Display, text: str, style: Style, after: Panel | None = None
     ) -> None:
         self.failure: BaseException | None = None
+        self.started = threading.Event()   # drawing has begun (or it was skipped)
+        self.skipped = False
+        self.lock = threading.Lock()
+        if after is not None:
+            after.supersede()
         self.thread = threading.Thread(
             target=self.run, args=(display, text, style, after), daemon=True
         )
         self.thread.start()
 
+    def supersede(self) -> None:
+        # A newer screen has arrived: if this one has not begun drawing, drop it.
+        with self.lock:
+            if not self.started.is_set():
+                self.skipped = True
+
     def run(self, display: Display, text: str, style: Style, after: Panel | None) -> None:
         if after is not None:
             after.thread.join()
+        with self.lock:
+            self.started.set()
+            if self.skipped:
+                return
         try:
             display.show(text, *style)
         except BaseException as e:
@@ -108,18 +132,45 @@ class Panel:
             raise self.failure
 
 
-def say(
+def utter(
     display: Display,
+    entity: anthropic.Anthropic,
+    eleven: ElevenLabs | None,
+    voice_id: str | None,
     text: str,
-    audio: np.ndarray | None,
+    language: str,
     *stops: threading.Event,
     style: Style = (TEXT_COLOR, BACKGROUND),
+    after: Panel | None = None,
+    bed: np.ndarray | None = None,
+    voice_offset_secs: float = 0.0,
 ) -> None:
-    # Print and speak one utterance, the panel refresh alongside the playback;
-    # returns when both are done.
-    panel = Panel(display, text, style)
-    if audio is not None:
-        play(audio, *stops)
+    """
+    One utterance, written and spoken, each the moment it is ready and neither
+    waiting for the other: the voice streams as it is synthesised, starting
+    about a second after the text exists, while the poem is still being written;
+    the poem starts drawing as soon as it is written (behind after, the screen
+    before it — see Panel). The words and the voice arrive apart, as from
+    something present but not quite here. Returns when both are done.
+
+    bed is played under the voice from the start (the greeting's bell), the
+    voice coming in voice_offset_secs later.
+    """
+    voice = threading.Thread(
+        target=play_stream,
+        args=(speech(eleven, voice_id, text), *stops),
+        kwargs={"bed": bed, "voice_offset_secs": voice_offset_secs},
+        daemon=True,
+    )
+    voice.start()
+    try:
+        poem = inscribe(entity, text, language)
+    except Exception as e:
+        print(f"  [inscription failed: {type(e).__name__}: {e}]")
+        poem = text
+    print(f"  Panel: {poem!r}")
+    panel = Panel(display, poem, style, after=after)
+    voice.join()
     panel.join()
 
 
@@ -157,6 +208,11 @@ def run_ritual(
     bell = random_bell()
     invitation: Panel | None = None
     transition: Panel | None = None
+    wordless: Panel | None = None   # the latest blank or red screen of the dialogue
+
+    def show_wordless(style: Style) -> None:
+        nonlocal wordless
+        wordless = Panel(display, "", style, after=wordless)
     try:
         # plugs.entity_travel(False, 1)
         # plugs.entity_travel(True, 2)
@@ -205,19 +261,21 @@ def run_ritual(
         greeting = ask_entity(entity, [], GREETING_REQUEST, prayer_text, language=prayer_lang)
         check(session)
         print(f"\n  They: {greeting}\n")
-        pcm = synthesize(eleven, voice_id, greeting)
-        check(session)
-        transition.join()   # one refresh at a time on the panel
         # plugs.entity_travel(False, 2)
         # The bell tolls once; the greeting rises out of it 3 seconds in
-        say(display, greeting, bell_mix(bell, voice=build_voice(pcm) if pcm else None),
-            session.abort, style=GREETING_STYLE)
+        utter(display, entity, eleven, voice_id, greeting, language, session.abort,
+              style=GREETING_STYLE, after=transition,
+              bed=bell_mix(bell), voice_offset_secs=3.0)
         check(session)
         print("\nTap once to ask a question and again when done, or double press to end.\n")
 
         # ── DIALOGUE LOOP ─────────────────────────────────────────────────────
         while True:
-            ended = record_question(session, QUESTION_WAV)
+            ended = record_question(
+                session, QUESTION_WAV,
+                on_start=lambda: show_wordless(LISTENING_STYLE),
+                on_end=lambda: show_wordless(HEARD_STYLE),
+            )
             check(session)
 
             if ended:
@@ -242,11 +300,10 @@ def run_ritual(
             answer = ask_entity(entity, history, question, prayer_text, language=q_lang)
             check(session)
             print(f"\n  They: {answer}\n")
-            pcm = synthesize(eleven, voice_id, answer)
-            check(session)
-
             # 'e' cuts the answer short, as a double clap did in tuhanKami
-            say(display, answer, build_voice(pcm) if pcm else None, session.abort, session.end)
+            utter(display, entity, eleven, voice_id, answer, language,
+                  session.abort, session.end, after=wordless)
+            wordless = None
             check(session)
 
         # ── FAREWELL ──────────────────────────────────────────────────────────
@@ -256,10 +313,9 @@ def run_ritual(
         farewell = ask_entity(entity, history, FAREWELL_REQUEST, prayer_text, language=prayer_lang)
         check(session)
         print(f"\n  They: {farewell}\n")
-        pcm = synthesize(eleven, voice_id, farewell)
-        check(session)
-        say(display, farewell, build_voice(pcm) if pcm else None, session.abort,
-            style=FAREWELL_STYLE)
+        utter(display, entity, eleven, voice_id, farewell, language, session.abort,
+              style=FAREWELL_STYLE, after=wordless)
+        wordless = None
         check(session)
         # Three overlapping bells close the ritual
         play(bell_mix(bell, times=3, overlap_secs_min=5.5, overlap_secs_max=7.0), session.abort)
@@ -271,9 +327,15 @@ def run_ritual(
     except Exception as e:
         # A session must never take the installation down with it.
         print(f"\n  [Ritual failed: {type(e).__name__}: {e}]\n")
+        try:
+            # The entity withdraws in its own words, after any screen still drawing
+            Panel(display, consent.FAILED[language], TRANSITION_STYLE,
+                  after=wordless or transition or invitation).join()
+        except Exception as e:
+            print(f"  [display failed: {e}]")
     finally:
         # Let a refresh still in flight finish before main() draws the consent form
-        for panel in (invitation, transition):
+        for panel in (invitation, transition, wordless):
             if panel is not None:
                 try:
                     panel.join()
@@ -297,6 +359,9 @@ def main() -> None:
     client = gemini.make_client()
     entity = llm.make_client()
     eleven = tts.make_client()
+    if eleven is not None:
+        # Clones a crash or a power cut kept the last session from deleting
+        tts.sweep(eleven)
     print(f"  [entity: {llm.MODEL} · transcription: {gemini.MODEL}]")
 
     language = DEFAULT_LANGUAGE
@@ -320,24 +385,38 @@ def main() -> None:
             )
             ritual_thread.start()
 
-            while ritual_thread.is_alive():
-                key = read_key()
-                if key in ("i", "p"):
-                    # Interrupt: signal abort and unblock any recording in progress
-                    print("\n  [Ritual interrupted. Restarting...]\n")
-                    session.abort.set()
-                    ritual_thread.join()
-                    break
-                elif key == "e":
-                    # End the session — the entity answers once more and departs
-                    if session.stage == DIALOGUE:
-                        print("\n  [Ending — the entity will say its farewell.]\n")
-                        session.end.set()
-                    else:
-                        print("\n  ['e' only ends the ritual during the dialogue.]\n")
-                elif key == "o" and session.stage in (PRAYER, DIALOGUE):
-                    # Ends the prayer; in the dialogue, opens and closes a question
-                    session.tap.set()
+            try:
+                watch(session, ritual_thread)
+            except KeyboardInterrupt:
+                # The ritual thread is a daemon and would die with the program,
+                # skipping its cleanup — and leaving the seeker's cloned voice on
+                # ElevenLabs. Stop it and let the cleanup run before exiting.
+                print("\n  [Stopping — clearing the session first...]")
+                session.abort.set()
+                ritual_thread.join(timeout=60)
+                raise
+
+
+def watch(session: Session, ritual_thread: threading.Thread) -> None:
+    # Route keys and button taps to the session until the ritual thread ends.
+    while ritual_thread.is_alive():
+        key = read_key()
+        if key in ("i", "p"):
+            # Interrupt: signal abort and unblock any recording in progress
+            print("\n  [Ritual interrupted. Restarting...]\n")
+            session.abort.set()
+            ritual_thread.join()
+            break
+        elif key == "e":
+            # End the session — the entity answers once more and departs
+            if session.stage == DIALOGUE:
+                print("\n  [Ending — the entity will say its farewell.]\n")
+                session.end.set()
+            else:
+                print("\n  ['e' only ends the ritual during the dialogue.]\n")
+        elif key == "o" and session.stage in (PRAYER, DIALOGUE):
+            # Ends the prayer; in the dialogue, opens and closes a question
+            session.tap.set()
 
 
 if __name__ == "__main__":

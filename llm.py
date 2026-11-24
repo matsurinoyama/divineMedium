@@ -6,8 +6,8 @@ import re
 
 import anthropic
 
-from display import BUDGET_CJK_CHARS, BUDGET_WORDS
-from prompts import build_system_prompt
+from display import BUDGET_CJK_CHARS, BUDGET_WORDS, fits, too_wide
+from prompts import INSCRIPTION_PROMPT, build_system_prompt
 
 # The entity speaks through Claude, as it did in tuhanKami; Gemini only transcribes.
 # Gemini stepped out of the voice under pressure (a seeker demanding proof about
@@ -68,7 +68,9 @@ FALLBACKS: dict[str, list[str]] = {
 def make_client() -> anthropic.Anthropic:
     if not os.environ.get("ANTHROPIC_API_KEY"):
         raise RuntimeError("ANTHROPIC_API_KEY is not set — see .env")
-    return anthropic.Anthropic()
+    # The SDK retries dropped connections, 429 and 5xx itself, with backoff;
+    # five tries rides out a short Wi-Fi drop instead of failing the session.
+    return anthropic.Anthropic(max_retries=5)
 
 
 def breaks_character(text: str) -> bool:
@@ -170,6 +172,65 @@ def ask_entity(
         answer = random.choice(FALLBACKS.get(language, FALLBACKS["en"]))
     history.append({"role": "assistant", "content": answer})
     return answer
+
+
+# How long the poem on the panel may be. Short enough to set at a large size,
+# with room for its line breaks, each of which costs a whole line or column.
+# Lines are asked to stay short enough to stand whole (display.too_wide measures
+# it on the real font: an English line holds only about 18 characters at 35px).
+INSCRIPTION_WORDS = 24      # latin, in all
+INSCRIPTION_CJK_CHARS = 48  # japanese, in all
+
+
+# A poem that talks about the task instead of doing it: "I cannot turn this into
+# a god's verse; if you tell me what the god said...". The entity's words often
+# address "you", and the model can mistake them for a message to itself.
+META_RE = re.compile(
+    r"\b(verse|poem|poetry|inscri\w*|the god|god's words|stanza|the passage"
+    r"|you('ve| have)? (gave|given)|tell me what)\b|詩|碑文|刻",
+    re.IGNORECASE,
+)
+
+
+def format_inscription(text: str) -> str:
+    # Clean the poem but keep its line breaks: here they are the verse.
+    text = MARKDOWN_RE.sub("", TAG_RE.sub("", text))
+    lines = (" ".join(line.split()).strip('"“”「」') for line in text.splitlines())
+    return "\n".join(line for line in lines if line)
+
+
+def inscribe(client: anthropic.Anthropic, utterance: str, language: str = "en") -> str:
+    """
+    The poem shown on the panel while utterance is spoken: a few short lines in
+    the god's voice, distilled from it.
+
+    Japanese lines come back short enough to stand whole; English ones often do
+    not, the panel being narrow for this brush face. Then each line becomes its
+    own small stanza (a paragraph gap between them), so a line that wraps still
+    reads as one line rather than two. Falls back to the spoken words themselves
+    — trimmed by the panel at a sentence end if they must be — when no poem stays
+    in the voice and fits.
+    """
+    if language in CHARACTER_COUNTED:
+        budget = f"no more than {INSCRIPTION_CJK_CHARS} characters in all"
+    else:
+        budget = f"no more than {INSCRIPTION_WORDS} words in all"
+    system = INSCRIPTION_PROMPT.format(
+        budget=budget, language=LANGUAGE_NAMES.get(language, language)
+    )
+    for attempt in range(2):
+        poem = format_inscription(generate(client, system, [{"role": "user", "content": (
+            "The god has just said this aloud to the seeker:\n\n"
+            f"<spoken>\n{utterance}\n</spoken>\n\n"
+            "Set it down now, as the god's own lines."
+        )}], 300))
+        if poem and not breaks_character(poem) and not META_RE.search(poem):
+            if too_wide(poem):
+                poem = poem.replace("\n", "\n\n")
+            if fits(poem):
+                return poem
+        print(f"  [inscription rejected: {poem[:60]!r}]")
+    return utterance
 
 
 # ── Echo voice ────────────────────────────────────────────────────────────────

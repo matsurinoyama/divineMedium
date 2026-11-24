@@ -5,6 +5,8 @@ import random
 import time
 from typing import Any, Callable
 
+import httpx
+import httpx2
 from google import genai
 from google.genai import errors, types
 
@@ -36,6 +38,9 @@ _thinking_supported = True
 # Codes worth retrying: the free tier answers bursts with 429 and the model is
 # periodically busy with 503.
 _RETRYABLE = {429, 500, 502, 503, 504}
+# A dropped connection or a DNS failure (the installation's Wi-Fi blinking) is
+# retried the same way rather than ending the session.
+NETWORK_ERRORS = (httpx.TransportError, httpx2.TransportError)
 
 
 def make_client() -> genai.Client:
@@ -66,9 +71,9 @@ def call_with_retry(fn: Callable[[], Any], label: str, tries: int = 5) -> Any:
     for attempt in range(1, tries + 1):
         try:
             return fn()
-        except errors.APIError as e:
-            code = getattr(e, "code", None)
-            if code not in _RETRYABLE or attempt == tries:
+        except (errors.APIError, *NETWORK_ERRORS) as e:
+            code = getattr(e, "code", None) or type(e).__name__
+            if (isinstance(e, errors.APIError) and code not in _RETRYABLE) or attempt == tries:
                 raise
             wait = round(2.0 * 2 ** (attempt - 1) * (0.75 + random.random() * 0.5), 1)
             print(f"  [{label}] {code} retry {attempt}/{tries - 1} in {wait}s")

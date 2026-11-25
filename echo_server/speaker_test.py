@@ -8,7 +8,7 @@ is what a session will sound like.
   python speaker_test.py
 
 Then type a command and press Enter:
-  1 2 3 4   solo that speaker, looping
+  1 2 3 …   solo that speaker, looping
   c         cycle: one speaker at a time, in turn (default)
   a         all speakers at once
   v         sound: the echo voice (default)
@@ -58,6 +58,10 @@ def make_sounds() -> dict[str, np.ndarray]:
     return {"v": voice, "p": np.clip(pink, -1, 1)}
 
 
+def side(channels: tuple[int, ...]) -> str:
+    return "+".join({0: "L", 1: "R"}.get(c, str(c)) for c in channels)
+
+
 def active(slot: int) -> bool:
     mode = state["mode"]
     if mode == "a":
@@ -68,23 +72,27 @@ def active(slot: int) -> bool:
     return mode == str(slot + 1)
 
 
-def run_device(device, nch: int, slots: list[tuple[int, int]], sounds: dict) -> None:
-    # slots: (slot index, channel) on this device
+def run_device(device, nch: int, slots: list[tuple[int, tuple[int, ...]]], sounds: dict) -> None:
+    # slots: (slot index, its channels) on this device
     pos = 0
-    try:
-        with sd.OutputStream(samplerate=echoes.SAMPLE_RATE, device=device,
-                             channels=nch, dtype="float32") as stream:
-            while not stop.is_set():
-                sound = sounds[state["sound"]]
-                idx = (np.arange(CHUNK) + pos) % len(sound)
-                pos = (pos + CHUNK) % len(sound)
-                frame = np.zeros((CHUNK, nch), dtype="float32")
-                for slot, ch in slots:
-                    if active(slot):
-                        frame[:, ch] = sound[idx]
-                stream.write(frame)
-    except Exception as e:
-        print(f"  [device {device} error: {e}]")
+    while not stop.is_set():
+        try:
+            with sd.OutputStream(samplerate=echoes.SAMPLE_RATE, device=device,
+                                 channels=nch, dtype="float32") as stream:
+                while not stop.is_set():
+                    sound = sounds[state["sound"]]
+                    idx = (np.arange(CHUNK) + pos) % len(sound)
+                    pos = (pos + CHUNK) % len(sound)
+                    frame = np.zeros((CHUNK, nch), dtype="float32")
+                    for slot, channels in slots:
+                        if active(slot):
+                            for ch in channels:
+                                frame[:, ch] = sound[idx]
+                    stream.write(frame)
+        except Exception as e:
+            # A USB adapter waking up, or two devices opened at once: try again
+            print(f"  [device {device} error — retrying: {e}]")
+            stop.wait(1.0)
 
 
 def status() -> str:
@@ -100,8 +108,8 @@ def announce() -> None:
         if state["mode"] == "c":
             now = [i for i in range(len(echoes.ECHO_OUTPUTS)) if active(i)]
             if now != last and now:
-                dev, ch, _ = echoes.ECHO_OUTPUTS[now[0]]
-                print(f"    ▶ speaker {now[0] + 1}  ({dev}, {'L' if ch == 0 else 'R' if ch == 1 else ch})")
+                dev, channels, _ = echoes.ECHO_OUTPUTS[now[0]]
+                print(f"    ▶ speaker {now[0] + 1}  ({dev}, {side(channels)})")
             last = now
         else:
             last = None
@@ -110,10 +118,10 @@ def announce() -> None:
 
 def main() -> None:
     sounds = make_sounds()
-    devices: dict[tuple, list[tuple[int, int]]] = {}
-    for i, (dev, ch, nch) in enumerate(echoes.ECHO_OUTPUTS):
-        devices.setdefault((dev, nch), []).append((i, ch))
-        print(f"  speaker {i + 1}: {dev} ch{ch}")
+    devices: dict[tuple, list[tuple[int, tuple[int, ...]]]] = {}
+    for i, (dev, channels, nch) in enumerate(echoes.ECHO_OUTPUTS):
+        devices.setdefault((dev, nch), []).append((i, channels))
+        print(f"  speaker {i + 1}: {dev} {side(channels)}")
     for (dev, nch), slots in devices.items():
         threading.Thread(target=run_device, args=(dev, nch, slots, sounds), daemon=True).start()
     threading.Thread(target=announce, daemon=True).start()

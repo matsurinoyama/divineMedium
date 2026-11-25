@@ -42,19 +42,25 @@ CHARACTER_COUNTED = {"ja", "zh", "ko"}
 
 # ── Speakers ──────────────────────────────────────────────────────────────────
 
-def parse_outputs(spec: str | None) -> list[tuple[int | str | None, int, int]]:
+Output = tuple[int | str | None, tuple[int, ...], int]   # device, its channels, channels on the stream
+
+
+def parse_outputs(spec: str | None) -> list[Output]:
     """
-    ECHO_OUTPUTS as "device:channel:channels" entries, comma-separated — e.g. one
-    4-channel interface: "5:0:4,5:1:4,5:2:4,5:3:4", or two stereo devices:
-    "6:0:2,6:1:2,4:0:2,4:1:2". Device is an index or a name. Unset: the default
-    device's left and right, for trying it out on the laptop.
+    ECHO_OUTPUTS as "device:channel:channels" entries, comma-separated — one entry
+    per speaker. E.g. one 4-channel interface: "5:0:4,5:1:4,5:2:4,5:3:4", or two
+    stereo devices: "6:0:2,6:1:2,4:0:2,4:1:2". Channels joined with + make one
+    speaker of several: "4:0+1:2" sends the same echo to both sides of device 4.
+    Device is an index or a name. Unset: the default device's left and right,
+    for trying it out on the laptop.
     """
     if not spec:
-        return [(None, 0, 2), (None, 1, 2)]
+        return [(None, (0,), 2), (None, (1,), 2)]
     outputs = []
     for entry in spec.split(","):
-        dev, ch, nch = entry.strip().rsplit(":", 2)
-        outputs.append((int(dev) if dev.isdigit() else dev, int(ch), int(nch)))
+        dev, chs, nch = entry.strip().rsplit(":", 2)
+        channels = tuple(int(c) for c in chs.split("+"))
+        outputs.append((int(dev) if dev.isdigit() else dev, channels, int(nch)))
     return outputs
 
 
@@ -153,44 +159,51 @@ class SpeakerPlayer:
             self.thread = None
 
     def loop(self) -> None:
-        try:
-            with sd.OutputStream(samplerate=SAMPLE_RATE, device=self.device,
-                                 channels=self.num_channels, dtype="float32") as stream:
-                while not self.stop_event.is_set():
-                    frame = np.zeros((self.CHUNK, self.num_channels), dtype="float32")
-                    for ch in range(self.num_channels):
-                        try:
-                            while True:
-                                item = self.pending[ch].get_nowait()
-                                if item is None:
-                                    for layer in self.layers[ch]:
-                                        layer["vol"] *= 0.4
-                                    self.layers[ch] = [l for l in self.layers[ch]
-                                                       if l["vol"] >= self.VOL_THRESHOLD]
-                                else:
-                                    self.layers[ch].append({"audio": item, "pos": 0, "vol": 1.0})
-                                    self.layers[ch] = self.layers[ch][-self.MAX_LAYERS:]
-                        except queue.Empty:
-                            pass
-                        if not self.layers[ch]:
-                            continue
-                        mixed = np.zeros(self.CHUNK, dtype="float32")
-                        for layer in self.layers[ch]:
-                            pos = layer["pos"]
-                            end = min(pos + self.CHUNK, len(layer["audio"]))
-                            chunk = layer["audio"][pos:end]
-                            if len(chunk) < self.CHUNK:
-                                chunk = np.pad(chunk, (0, self.CHUNK - len(chunk)))
-                            mixed += chunk * layer["vol"]
-                            layer["pos"] = end if end < len(layer["audio"]) else 0
-                        mixed *= self.master[0]
-                        peak = float(np.max(np.abs(mixed)))
-                        if peak > 1.0:
-                            mixed /= peak
-                        frame[:, ch] = mixed
-                    stream.write(frame)
-        except Exception as e:
-            print(f"  [echo device {self.device} error: {e}]")
+        # A device can refuse to open (a USB adapter waking up, two opened at once)
+        # or drop out mid-session: keep trying, so one speaker is not lost for good.
+        while not self.stop_event.is_set():
+            try:
+                self.play()
+            except Exception as e:
+                print(f"  [echo device {self.device} error — retrying: {e}]")
+                self.stop_event.wait(1.0)
+
+    def play(self) -> None:
+        with sd.OutputStream(samplerate=SAMPLE_RATE, device=self.device,
+                             channels=self.num_channels, dtype="float32") as stream:
+            while not self.stop_event.is_set():
+                frame = np.zeros((self.CHUNK, self.num_channels), dtype="float32")
+                for ch in range(self.num_channels):
+                    try:
+                        while True:
+                            item = self.pending[ch].get_nowait()
+                            if item is None:
+                                for layer in self.layers[ch]:
+                                    layer["vol"] *= 0.4
+                                self.layers[ch] = [l for l in self.layers[ch]
+                                                   if l["vol"] >= self.VOL_THRESHOLD]
+                            else:
+                                self.layers[ch].append({"audio": item, "pos": 0, "vol": 1.0})
+                                self.layers[ch] = self.layers[ch][-self.MAX_LAYERS:]
+                    except queue.Empty:
+                        pass
+                    if not self.layers[ch]:
+                        continue
+                    mixed = np.zeros(self.CHUNK, dtype="float32")
+                    for layer in self.layers[ch]:
+                        pos = layer["pos"]
+                        end = min(pos + self.CHUNK, len(layer["audio"]))
+                        chunk = layer["audio"][pos:end]
+                        if len(chunk) < self.CHUNK:
+                            chunk = np.pad(chunk, (0, self.CHUNK - len(chunk)))
+                        mixed += chunk * layer["vol"]
+                        layer["pos"] = end if end < len(layer["audio"]) else 0
+                    mixed *= self.master[0]
+                    peak = float(np.max(np.abs(mixed)))
+                    if peak > 1.0:
+                        mixed /= peak
+                    frame[:, ch] = mixed
+                stream.write(frame)
 
 
 class EchoPlayer:
@@ -203,14 +216,15 @@ class EchoPlayer:
         for dev, _, nch in ECHO_OUTPUTS:
             players.setdefault((dev, nch), SpeakerPlayer(dev, nch, self.master))
         self.players = players
-        self.slots = [(players[(dev, nch)], ch) for dev, ch, nch in ECHO_OUTPUTS]
+        self.slots = [(players[(dev, nch)], chs) for dev, chs, nch in ECHO_OUTPUTS]
 
     def feed(self, audio: np.ndarray) -> None:
         # Dim everything already sounding, then send the new echo to one speaker at random.
         for player in self.players.values():
             player.dim_all()
-        player, ch = random.choice(self.slots)
-        player.feed(ch, audio)
+        player, channels = random.choice(self.slots)
+        for ch in channels:
+            player.feed(ch, audio)
 
     def fade_out(self, secs: float) -> None:
         # Fade every speaker to silence over secs, in the background.

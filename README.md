@@ -254,6 +254,7 @@ ANTHROPIC_API_KEY=...
 ELEVENLABS_API_KEY=...            # the same account as the Pi, so the clone is visible
 ECHO_OUTPUTS=5:0:4,5:1:4,5:2:4,5:3:4   # device:channel:channels — one 4-channel interface
 # ECHO_OUTPUTS=6:0:2,6:1:2,4:0:2,4:1:2 # or two stereo devices
+# ECHO_OUTPUTS=6:0:2,6:1:2,4:0+1:2   # 0+1: one speaker on both sides of a device (same echo on L and R)
 # ECHO_PORT=8765
 # ECHO_MODEL=claude-haiku-5-5
 ```

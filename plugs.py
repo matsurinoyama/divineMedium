@@ -21,6 +21,7 @@ import asyncio
 import os
 import queue
 import threading
+import time
 
 FAN = "fan"
 LIGHT = "light"
@@ -53,6 +54,8 @@ def _run() -> None:
             print(f"  [{name} {'on' if on else 'off'}]")
         except Exception as e:
             print(f"  [{name} plug unreachable: {type(e).__name__}: {e}]")
+        finally:
+            _outbox.task_done()
 
 
 def _set(name: str, on: bool) -> None:
@@ -71,6 +74,20 @@ def fans(on: bool) -> None:
 
 def lights(on: bool) -> None:
     _set(LIGHT, on)
+
+
+def flush(timeout: float = 10.0) -> None:
+    # Wait until every queued switch has been sent. Called before the program
+    # exits: once Python begins shutting down, the plugs can no longer be reached,
+    # and the room would be left as the session had it (fans on, lights off).
+    deadline = time.monotonic() + timeout
+    with _outbox.all_tasks_done:
+        while _outbox.unfinished_tasks:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                print("  [plugs: gave up waiting for the last switch]")
+                return
+            _outbox.all_tasks_done.wait(remaining)
 
 
 def idle() -> None:

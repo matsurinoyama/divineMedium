@@ -1,0 +1,141 @@
+"""
+Temporary: loop a test sound on the echo speakers, to set each speaker's volume.
+
+Plays through ECHO_OUTPUTS (echo_server/.env) at the echo's own level: the voice
+is a real echo (pitched down, reverberated, reverse reverb), so what you set here
+is what a session will sound like.
+
+  python speaker_test.py
+
+Then type a command and press Enter:
+  1 2 3 4   solo that speaker, looping
+  c         cycle: one speaker at a time, in turn (default)
+  a         all speakers at once
+  v         sound: the echo voice (default)
+  p         sound: pink noise, at the same loudness (easier to match by ear or meter)
+  q         quit
+"""
+
+from __future__ import annotations
+
+import os
+import threading
+import time
+
+from dotenv import load_dotenv
+
+load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
+
+import numpy as np
+import sounddevice as sd
+from elevenlabs.client import ElevenLabs
+
+import echoes
+
+VOICE_ID = os.getenv("TEST_VOICE_ID", "JOcmGzB8OFjY8MhjHHEf")   # JUN (Japanese), a stock voice
+LINE = "汝の祈りは届いた。恐れるな。朝の光を待て。"
+CYCLE_SECS = 4.0
+CHUNK = int(echoes.SAMPLE_RATE * 0.05)
+
+state = {"mode": "c", "sound": "v", "since": time.time()}
+stop = threading.Event()
+
+
+def make_sounds() -> dict[str, np.ndarray]:
+    print("  [synthesising the test voice...]")
+    eleven = ElevenLabs(api_key=os.environ["ELEVENLABS_API_KEY"])
+    voice = echoes.process(echoes.speak(eleven, VOICE_ID, LINE))
+    voice = echoes.trim_trailing_silence(voice)
+    voice = np.concatenate([voice, np.zeros(int(0.5 * echoes.SAMPLE_RATE), dtype="float32")])
+    # Pink noise (Voss-McCartney approximation via 1/f filtering), matched to the voice's RMS
+    n = echoes.SAMPLE_RATE * 4
+    spectrum = np.fft.rfft(np.random.randn(n))
+    f = np.arange(len(spectrum))
+    f[0] = 1
+    pink = np.fft.irfft(spectrum / np.sqrt(f), n).astype("float32")
+    rms = lambda x: float(np.sqrt(np.mean(x[np.abs(x) > 1e-4] ** 2)))
+    pink *= rms(voice) / rms(pink)
+    return {"v": voice, "p": np.clip(pink, -1, 1)}
+
+
+def active(slot: int) -> bool:
+    mode = state["mode"]
+    if mode == "a":
+        return True
+    if mode == "c":
+        n = len(echoes.ECHO_OUTPUTS)
+        return int((time.time() - state["since"]) / CYCLE_SECS) % n == slot
+    return mode == str(slot + 1)
+
+
+def run_device(device, nch: int, slots: list[tuple[int, int]], sounds: dict) -> None:
+    # slots: (slot index, channel) on this device
+    pos = 0
+    try:
+        with sd.OutputStream(samplerate=echoes.SAMPLE_RATE, device=device,
+                             channels=nch, dtype="float32") as stream:
+            while not stop.is_set():
+                sound = sounds[state["sound"]]
+                idx = (np.arange(CHUNK) + pos) % len(sound)
+                pos = (pos + CHUNK) % len(sound)
+                frame = np.zeros((CHUNK, nch), dtype="float32")
+                for slot, ch in slots:
+                    if active(slot):
+                        frame[:, ch] = sound[idx]
+                stream.write(frame)
+    except Exception as e:
+        print(f"  [device {device} error: {e}]")
+
+
+def status() -> str:
+    mode = {"c": f"cycling every {CYCLE_SECS:.0f}s", "a": "all at once"}.get(
+        state["mode"], f"speaker {state['mode']} solo")
+    return f"  [{mode} · {'echo voice' if state['sound'] == 'v' else 'pink noise'}]"
+
+
+def announce() -> None:
+    # In cycle mode, say which speaker is playing as it changes
+    last = None
+    while not stop.is_set():
+        if state["mode"] == "c":
+            now = [i for i in range(len(echoes.ECHO_OUTPUTS)) if active(i)]
+            if now != last and now:
+                dev, ch, _ = echoes.ECHO_OUTPUTS[now[0]]
+                print(f"    ▶ speaker {now[0] + 1}  ({dev}, {'L' if ch == 0 else 'R' if ch == 1 else ch})")
+            last = now
+        else:
+            last = None
+        time.sleep(0.1)
+
+
+def main() -> None:
+    sounds = make_sounds()
+    devices: dict[tuple, list[tuple[int, int]]] = {}
+    for i, (dev, ch, nch) in enumerate(echoes.ECHO_OUTPUTS):
+        devices.setdefault((dev, nch), []).append((i, ch))
+        print(f"  speaker {i + 1}: {dev} ch{ch}")
+    for (dev, nch), slots in devices.items():
+        threading.Thread(target=run_device, args=(dev, nch, slots, sounds), daemon=True).start()
+    threading.Thread(target=announce, daemon=True).start()
+    print(__doc__.split("Then type", 1)[1].split("\n", 1)[1])
+    print(status())
+    try:
+        while True:
+            cmd = input().strip().lower()
+            if cmd == "q":
+                break
+            if cmd in ("c", "a") or (cmd.isdigit() and 1 <= int(cmd) <= len(echoes.ECHO_OUTPUTS)):
+                state["mode"], state["since"] = cmd, time.time()
+            elif cmd in ("v", "p"):
+                state["sound"] = cmd
+            else:
+                continue
+            print(status())
+    except (KeyboardInterrupt, EOFError):
+        pass
+    stop.set()
+    time.sleep(0.3)
+
+
+if __name__ == "__main__":
+    main()

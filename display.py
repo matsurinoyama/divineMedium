@@ -71,6 +71,11 @@ BUDGET_WORDS = 34       # latin words
 BUDGET_CJK_CHARS = 95   # japanese characters
 
 # ── Orientation ───────────────────────────────────────────────────────────────
+# The panel is mounted upside down, so every frame is turned 180° on its way to
+# the hardware. Layout is still done upright and screen.png stays upright.
+# ROTATE=0 puts it back.
+PANEL_ROTATION = int(os.getenv("ROTATE", "180"))
+
 # Japanese is set vertically (縦書き): columns run top to bottom, and the columns
 # themselves run right to left, which is how a prayer or an oracle would be
 # written. Latin stays horizontal. VERTICAL=always/never overrides the detection.
@@ -580,6 +585,8 @@ class Display:
             return
         started = time.monotonic()
         self.epd.init()
+        if PANEL_ROTATION:
+            image = image.rotate(PANEL_ROTATION, expand=True)
         self.epd.display(self.epd.getbuffer(image))
         self._sleep()
         print(f"  [displayed in {time.monotonic() - started:.1f}s]")

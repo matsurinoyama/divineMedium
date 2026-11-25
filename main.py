@@ -16,11 +16,13 @@ from elevenlabs.client import ElevenLabs
 load_dotenv()
 
 import consent
+import echo
 import listen
 import llm
+import plugs
 import tts
-# import plugs                      # smart plugs — see the commented calls below
 from audio import (
+    PLAYBACK_RATE,
     PRAYER_SAMPLE_RATE,
     bell_mix,
     compress_for_ivc,
@@ -167,7 +169,13 @@ def utter(
 
     bed is played under the voice from the start (the greeting's bell), the
     voice coming in voice_offset_secs later.
+
+    The echo server on the Mac is told at once, so the echo — fragments of the
+    same words in the same voice, on the surrounding speakers — follows a few
+    seconds behind the voice.
     """
+    if voice_id is not None:
+        echo.utter(text)
     voice = threading.Thread(
         target=play_stream,
         args=(speech(eleven, voice_id, text), *stops),
@@ -225,9 +233,6 @@ def run_ritual(
         nonlocal wordless
         wordless = Panel(display, "", style, after=wordless)
     try:
-        # plugs.entity_travel(False, 1)
-        # plugs.entity_travel(True, 2)
-
         # ── PRAYER ────────────────────────────────────────────────────────────
         session.stage = PRAYER
         hearing: listen.Listener | None = None
@@ -266,7 +271,8 @@ def run_ritual(
                 print(f"  [voice clone failed — continuing text-only: {type(e).__name__}: {e}]")
                 return None
 
-        # plugs.entity_travel(True, 1)
+        # The god draws near: the fans rise while the voice is cloned
+        plugs.fans(True)
         with ThreadPoolExecutor(max_workers=1) as pool:
             cloning = pool.submit(clone)
             print("  [Transcribing...]")
@@ -285,15 +291,19 @@ def run_ritual(
             print("  (no speech found in the prayer — returning to idle)\n")
             return
         print(f"  Prayer received. [{prayer_lang}]\n")
+        if voice_id is not None:
+            # The echo speaks in the same clone, on the Mac's speakers
+            echo.start(voice_id, language)
 
         # ── GREETING ──────────────────────────────────────────────────────────
         session.stage = DIALOGUE
         history: list[dict] = []  # running conversation, as Messages API turns
-        # plugs.entity_travel(False, 1)
+        plugs.fans(False)
         greeting = ask_entity(entity, [], GREETING_REQUEST, prayer_text, language=prayer_lang)
         check(session)
         print(f"\n  They: {greeting}\n")
-        # plugs.entity_travel(False, 2)
+        # The god has arrived: the lights go out as the bell tolls
+        plugs.lights(False)
         # The bell tolls once; the greeting rises out of it 3 seconds in
         utter(display, entity, eleven, voice_id, greeting, language, session.abort,
               style=GREETING_STYLE, after=transition,
@@ -361,18 +371,22 @@ def run_ritual(
         # ── FAREWELL ──────────────────────────────────────────────────────────
         session.stage = FAREWELL
         print("  [They depart...]")
-        # plugs.entity_travel(True, 1)
+        # The god departs on the wind it came in on
+        plugs.fans(True)
         farewell = ask_entity(entity, history, FAREWELL_REQUEST, prayer_text, language=prayer_lang)
         check(session)
         print(f"\n  They: {farewell}\n")
         utter(display, entity, eleven, voice_id, farewell, language, session.abort,
               style=FAREWELL_STYLE, after=wordless)
         wordless = None
+        plugs.fans(False)
         check(session)
-        # Three overlapping bells close the ritual
-        play(bell_mix(bell, times=3, overlap_secs_min=5.5, overlap_secs_max=7.0), session.abort)
-        # plugs.entity_travel(False, 1)
-        # plugs.entity_travel(True, 2)
+        # Three overlapping bells close the ritual; the echoes fade away beneath them
+        bells = bell_mix(bell, times=3, overlap_secs_min=5.5, overlap_secs_max=7.0)
+        echo.fade(len(bells) / PLAYBACK_RATE)
+        play(bells, session.abort)
+        # The god is gone: the lights return
+        plugs.lights(True)
 
     except RitualAborted:
         pass
@@ -394,7 +408,9 @@ def run_ritual(
                 except Exception as e:
                     print(f"  [display failed: {e}]")
         # Always clean up — the clone and the recordings are deleted even if the
-        # ritual was interrupted
+        # ritual was interrupted. The echo server hears first, so it makes no
+        # more echoes in a voice that is about to be gone.
+        echo.end()
         if eleven is not None and voice_id is not None:
             tts.delete_voice(eleven, voice_id)
         for path in (PRAYER_WAV, PRAYER_UPLOAD_WAV, QUESTION_WAV):
@@ -402,6 +418,8 @@ def run_ritual(
                 os.remove(path)
         # The panel is not cleared here: main() puts the consent form back up
         # straight away, so no seeker's answer is left on display for the next one.
+        # The room as it was, however the session ended (no-ops after a full ritual)
+        plugs.idle()
         session.stage = IDLE
         print("  [Ritual cleared.]\n")
 
@@ -412,6 +430,8 @@ def main() -> None:
     eleven = tts.make_client()
     # Clones a crash or a power cut kept the last session from deleting
     tts.sweep(eleven)
+    # The room starts as it waits between sessions
+    plugs.idle()
     print(f"  [entity: {llm.MODEL} · transcription: {listen.MODEL_ID}]")
 
     language = DEFAULT_LANGUAGE

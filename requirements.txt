@@ -19,5 +19,5 @@ Pillow
 spidev; sys_platform == "linux"
 gpiozero; sys_platform == "linux"
 
-# Smart plugs: not used by main.py, see plugs.py
-# python-kasa
+# Smart plugs: the fans and lights, see plugs.py
+python-kasa

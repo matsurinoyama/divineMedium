@@ -1,46 +1,79 @@
 """
-TP-Link Tapo smart plug control, carried over from tuhanKami.
+The god's presence in the room, carried over from tuhanKami: two TP-Link Tapo
+smart plugs, one driving the fans and one the lights.
 
-Nothing in this installation calls it. main.py keeps the original call sites as
-commented lines (`# plugs.entity_travel(...)`) at the points in the ritual where
-tuhanKami drove its fans and lights, so the staging can be switched back on by
-uncommenting them and the import at the top of main.py.
+  The fans are its travel: they blow while it draws near (the voice being
+  cloned from the prayer) and while it departs (the farewell).
+  The lights are the world without it: on between sessions, off once it has
+  arrived, on again after the last bell.
 
-To use it:
-  1. pip install python-kasa
-  2. fill in TPLINK_* in .env
-  3. uncomment `import plugs` and the calls in main.py
+Plugs are switched in order on one background thread, so the ritual never waits
+for a Tapo handshake (a second or two). An unset address or a plug that cannot be
+reached is skipped with a message — it never interrupts a session.
 
-Plug 1 was the one that pulsed with the entity's attention (on while it listened
-and transcribed, off while it spoke); plug 2 held the ambient state between
-sessions.
+  TPLINK_FAN, TPLINK_LIGHT        the plugs' IP addresses
+  TPLINK_USERNAME, TPLINK_PASSWORD  the TP-Link (Tapo) account
 """
 
 from __future__ import annotations
 
 import asyncio
 import os
+import queue
+import threading
+
+FAN = "fan"
+LIGHT = "light"
+HOSTS = {FAN: os.getenv("TPLINK_FAN"), LIGHT: os.getenv("TPLINK_LIGHT")}
+
+_outbox: queue.Queue[tuple[str, bool]] = queue.Queue()
+_worker: threading.Thread | None = None
 
 
-def entity_travel(on: bool, device: int) -> None:
-    # Toggle a TP-Link Tapo smart plug on or off. device is the plug number (1 or 2).
-    async def run():
-        from kasa import Discover
+async def _switch(name: str, on: bool) -> None:
+    from kasa import Discover
 
-        dev = await Discover.discover_single(
-            os.environ["TPLINK_HOST-" + str(device)],
-            username=os.environ["TPLINK_USERNAME"],
-            password=os.environ["TPLINK_PASSWORD"],
-        )
-        if on:
-            await dev.turn_on()
-        else:
-            await dev.turn_off()
+    dev = await Discover.discover_single(
+        HOSTS[name],
+        username=os.environ["TPLINK_USERNAME"],
+        password=os.environ["TPLINK_PASSWORD"],
+    )
+    try:
+        await (dev.turn_on() if on else dev.turn_off())
         await dev.update()
+    finally:
         await dev.disconnect()
 
-    try:
-        asyncio.run(run())
-    except Exception as e:
-        # A missing plug must never interrupt a session in progress.
-        print(f"  [plug {device} unreachable: {e}]")
+
+def _run() -> None:
+    while True:
+        name, on = _outbox.get()
+        try:
+            asyncio.run(_switch(name, on))
+            print(f"  [{name} {'on' if on else 'off'}]")
+        except Exception as e:
+            print(f"  [{name} plug unreachable: {type(e).__name__}: {e}]")
+
+
+def _set(name: str, on: bool) -> None:
+    global _worker
+    if not HOSTS[name]:
+        return
+    if _worker is None:
+        _worker = threading.Thread(target=_run, daemon=True)
+        _worker.start()
+    _outbox.put((name, on))
+
+
+def fans(on: bool) -> None:
+    _set(FAN, on)
+
+
+def lights(on: bool) -> None:
+    _set(LIGHT, on)
+
+
+def idle() -> None:
+    # Between sessions: still air, lights on.
+    fans(False)
+    lights(True)

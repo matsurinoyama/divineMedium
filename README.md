@@ -12,11 +12,11 @@ The original is an audio piece — cloned voices, bells, an echo thrown across s
 | --- | --- | --- |
 | Entity | Claude (`claude-haiku-4-5`) | Claude (`claude-haiku-5-5`) |
 | Transcription | local Whisper `small` | ElevenLabs Scribe, realtime (`scribe_v2_realtime`), as each word is spoken |
-| Output | two cloned voices, bells, echo speakers | one e-paper screen per utterance, spoken in the cloned voice over bells |
-| Voice cloning | ElevenLabs IVC + remix | ElevenLabs IVC only — the seeker's own voice, no remix or pitch shift, reverse reverb only; no echo voice yet |
+| Output | two cloned voices, bells, echo speakers | one e-paper screen per utterance, spoken in the cloned voice over bells; echoes on four speakers driven by a Mac |
+| Voice cloning | ElevenLabs IVC + remix | ElevenLabs IVC only — the seeker's own voice, no remix or pitch shift, reverse reverb only; the echo uses the same clone (on the Mac) |
 | Discrete input | double clap, detected on the microphone | PiSugar button or keyboard (GPIO buttons ready in `control.py`) |
 | Consent | — | a consent form on the panel; nothing is recorded until it is given |
-| Smart plugs | driven through the ritual | kept in `plugs.py`, every call commented out |
+| Smart plugs | driven through the ritual | driven through the ritual: fans while the god arrives and departs, lights off while it is present |
 | Platform | macOS | Raspberry Pi (the panel is SPI/GPIO) |
 
 Questions are found by the same voice-activity detection, but transcribed live as they are spoken (ElevenLabs Scribe, realtime): the answer is ready about a second after the seeker stops — and sometimes the entity does not wait for them to stop.
@@ -76,7 +76,9 @@ Questions are found by the same voice-activity detection, but transcribed live a
 | `pisugar_button.sh` | Forwards PiSugar button taps to `main.py` |
 | `llm.py` | Claude entity responses, length budgeting, and the out-of-character guard |
 | `prompts.py` | Entity system prompt (the persona and its rules) |
-| `plugs.py` | TP-Link smart plugs — present, never called |
+| `echo.py` | Sends each utterance to the echo server on the Mac |
+| `echo_server/` | Runs on the Mac: echo text, the echo voice, and quad-speaker playback |
+| `plugs.py` | TP-Link Tapo plugs: the fans and the lights, switched in the background |
 | `debug_display.py` | Render text to the panel or to `screen.png` without a ritual |
 
 ## Hardware
@@ -123,6 +125,10 @@ ELEVENLABS_API_KEY=your_elevenlabs_key_here
 # SPEECH_INPUT=1                     # sounddevice input index for the microphone
 # MAIN_OUTPUT=0                      # sounddevice output index for the voice and bells
 # VERTICAL=auto                      # auto / always / never
+# ECHO_HOST=mymac.local:8765        # the echo server on the Mac (unset: no echo)
+# TPLINK_FAN=172.27.56.184          # Tapo plug for the fans (unset: skipped)
+# TPLINK_LIGHT=172.27.56.185        # Tapo plug for the lights
+# TPLINK_USERNAME=…  TPLINK_PASSWORD='…'   # the Tapo account; quote the password
 ```
 
 ### Audio device
@@ -226,9 +232,33 @@ The underlying principle, encoded explicitly in the system prompt, is Jaynes': t
 
 
 
-## The echo voice (not yet)
+## The echo (on a Mac)
 
-tuhanKami's second voice — a remixed clone speaking fragmented, looping repetitions of each answer through surrounding speakers — is not ported yet. `BackgroundEchoPlayer` and the pitch shift are in `base/tuhanKami/audio.py`, the remix in `base/tuhanKami/tts.py`, and `ask_echo` in `base/tuhanKami/llm.py`.
+The echo is tuhanKami's second voice: broken, looping fragments of every greeting, answer and farewell, played on four speakers around the room. It runs on a Mac, from `echo_server/`, because the Pi is busy with the panel. Unlike in tuhanKami, there is no remix. The echo uses the seeker's own clone with tuhanKami's echo settings (unstable, slow), pitched down 2 semitones and reverberated. The bells only play from the Pi; during the three farewell bells the echoes fade to silence.
+
+The Pi sends only commands and text (`echo.py`): `start` with the clone's voice id, `utter` with each utterance, `fade` with the bells' length, and `end`. The Mac writes the fragments with Claude, synthesises them in the same voice, and picks a speaker at random for each one; every new echo dims the ones still sounding. If `ECHO_HOST` is unset or the Mac can't be reached, the ritual carries on without the echo. `end` is sent before the Pi deletes the clone.
+
+On the Mac:
+
+```bash
+cd echo_server
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+python server.py --devices        # find the output device index
+```
+
+`echo_server/.env`:
+
+```
+ANTHROPIC_API_KEY=...
+ELEVENLABS_API_KEY=...            # the same account as the Pi, so the clone is visible
+ECHO_OUTPUTS=5:0:4,5:1:4,5:2:4,5:3:4   # device:channel:channels — one 4-channel interface
+# ECHO_OUTPUTS=6:0:2,6:1:2,4:0:2,4:1:2 # or two stereo devices
+# ECHO_PORT=8765
+# ECHO_MODEL=claude-haiku-5-5
+```
+
+Then run `python server.py`, and set `ECHO_HOST=<mac>.local:8765` in the Pi's `.env`. If `ECHO_OUTPUTS` is unset, the echo plays on the Mac's default left and right outputs, for testing.
 
 ## Credits and AI Disclosure
 

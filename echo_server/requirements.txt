@@ -1,0 +1,7 @@
+# The echo server, on the Mac (PortAudio: brew install portaudio)
+anthropic
+elevenlabs
+python-dotenv
+numpy
+scipy
+sounddevice

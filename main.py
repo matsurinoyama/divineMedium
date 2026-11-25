@@ -494,3 +494,6 @@ if __name__ == "__main__":
         main()
     except KeyboardInterrupt:
         print("\n  [Exiting.]\n")
+    finally:
+        # The room is put back (fans off, lights on) before the program goes
+        plugs.flush()

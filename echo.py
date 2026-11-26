@@ -12,31 +12,63 @@ from __future__ import annotations
 import os
 import queue
 import threading
+import time
 
 import httpx
 
 HOST = os.getenv("ECHO_HOST")   # e.g. "mymac.local:8765"
 TIMEOUT = 3.0
+TRIES = 3          # per message, ~1 s and 2 s apart: rides out a Wi-Fi blink
 
 _outbox: queue.Queue[tuple[str, dict, threading.Event | None]] = queue.Queue()
 _worker: threading.Thread | None = None
 _unreachable = False   # said once, not on every message
+# The current session's /start, kept until the Mac has it. Without it the Mac
+# ignores every line, so a /start lost to a network blink is sent again before
+# the next message — the echo joins late rather than not at all.
+_pending_start: dict | None = None
+
+
+def _post(client: httpx.Client, path: str, body: dict) -> bool:
+    # One message, retried; True once the Mac has it.
+    global _unreachable
+    for attempt in range(1, TRIES + 1):
+        try:
+            client.post(path, json=body).raise_for_status()
+            if _unreachable:
+                print("  [echo: reached again]")
+            _unreachable = False
+            return True
+        except Exception as e:
+            if attempt < TRIES:
+                time.sleep(attempt)
+                continue
+            if not _unreachable:
+                print(f"  [echo: server unreachable — carrying on without it ({type(e).__name__})]")
+            _unreachable = True
+    return False
 
 
 def _run() -> None:
-    global _unreachable
+    global _pending_start
     with httpx.Client(base_url=f"http://{HOST}", timeout=TIMEOUT) as client:
         while True:
             path, body, done = _outbox.get()
             try:
-                client.post(path, json=body).raise_for_status()
-                if _unreachable:
-                    print("  [echo: reached again]")
-                _unreachable = False
-            except Exception as e:
-                if not _unreachable:
-                    print(f"  [echo: server unreachable — carrying on without it ({type(e).__name__})]")
-                _unreachable = True
+                if path == "/start":
+                    _pending_start = body
+                    if _post(client, path, body):
+                        _pending_start = None
+                    continue
+                if _pending_start is not None:
+                    if path == "/end":
+                        _pending_start = None   # the Mac never had this session
+                        continue
+                    if not _post(client, "/start", _pending_start):
+                        continue                # still unreachable: drop this line
+                    _pending_start = None
+                    print("  [echo: session started late]")
+                _post(client, path, body)
             finally:
                 if done is not None:
                     done.set()
@@ -73,4 +105,4 @@ def fade(secs: float) -> None:
 def end() -> None:
     # The session is over. Waits (briefly) until the Mac has heard, so no echo is
     # made after the voice clone is deleted.
-    _send("/end", {}, wait=TIMEOUT + 1.0)
+    _send("/end", {}, wait=TRIES * (TIMEOUT + 2.0))

@@ -8,6 +8,7 @@ fade as new ones arrive. Runs on the Mac; the Pi only sends the words.
 
 from __future__ import annotations
 
+import collections
 import os
 import queue
 import random
@@ -38,6 +39,17 @@ ECHO_VOICE_SETTINGS = VoiceSettings(
 
 # Languages written without spaces, where a word budget means nothing
 CHARACTER_COUNTED = {"ja", "zh", "ko"}
+
+
+# ── Session log ───────────────────────────────────────────────────────────────
+# What happened to each echo, kept for GET /status: the Pi prints it at the end
+# of every session, so a failure on the Mac shows up in the Pi's log too.
+LOG: collections.deque[str] = collections.deque(maxlen=60)
+
+
+def note(message: str) -> None:
+    print(f"  [{message}]")
+    LOG.append(f"{time.strftime('%H:%M:%S')} {message}")
 
 
 # ── Speakers ──────────────────────────────────────────────────────────────────
@@ -165,12 +177,13 @@ class SpeakerPlayer:
             try:
                 self.play()
             except Exception as e:
-                print(f"  [echo device {self.device} error — retrying: {e}]")
+                note(f"speaker {self.device!r} error — retrying: {type(e).__name__}: {e}")
                 self.stop_event.wait(1.0)
 
     def play(self) -> None:
         with sd.OutputStream(samplerate=SAMPLE_RATE, device=self.device,
                              channels=self.num_channels, dtype="float32") as stream:
+            note(f"speaker {self.device!r} open ({self.num_channels} ch)")
             while not self.stop_event.is_set():
                 frame = np.zeros((self.CHUNK, self.num_channels), dtype="float32")
                 for ch in range(self.num_channels):
@@ -225,6 +238,9 @@ class EchoPlayer:
         player, channels = random.choice(self.slots)
         for ch in channels:
             player.feed(ch, audio)
+        peak = float(np.max(np.abs(audio))) if len(audio) else 0.0
+        note(f"echo sent to {player.device!r} ch {'+'.join(map(str, channels))} — "
+             f"{len(audio) / SAMPLE_RATE:.1f}s, peak {peak:.2f}, master {self.master[0]:.2f}")
 
     def fade_out(self, secs: float) -> None:
         # Fade every speaker to silence over secs, in the background.

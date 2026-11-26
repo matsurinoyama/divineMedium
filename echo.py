@@ -106,3 +106,19 @@ def end() -> None:
     # The session is over. Waits (briefly) until the Mac has heard, so no echo is
     # made after the voice clone is deleted.
     _send("/end", {}, wait=TRIES * (TIMEOUT + 2.0))
+    report()
+
+
+def report() -> None:
+    # What the Mac says happened to this session's echoes — its errors included,
+    # which otherwise appear only in the Mac's own terminal.
+    if not HOST:
+        return
+    try:
+        log = httpx.get(f"http://{HOST}/status", timeout=TIMEOUT).json().get("log", [])
+    except Exception as e:
+        print(f"  [echo: no report from the Mac ({type(e).__name__})]")
+        return
+    print("  [echo — the Mac reports:]")
+    for line in log or ["(nothing: it never heard of this session)"]:
+        print(f"    {line}")

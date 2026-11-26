@@ -8,6 +8,7 @@ the four speakers around the room. The bells stay on the Pi.
   POST /fade   {"secs": 20}                          the farewell bells: fade out
   POST /end    {}                                    the session is over
   GET  /health
+  GET  /status                                       what happened this session
 
   python server.py                 serve on 0.0.0.0:8765 (ECHO_PORT)
   python server.py --devices       list the audio outputs, for ECHO_OUTPUTS
@@ -70,8 +71,9 @@ class Echo:
             if self.session is not None:
                 # The Pi never ended the last one (a crash, a power cut)
                 self.session.close()
+            echoes.LOG.clear()
             self.session = Session(voice_id, language)
-        print(f"  [session: {language} · {echoes.ECHO_OUTPUTS}]")
+        echoes.note(f"session start: {language} · outputs {echoes.ECHO_OUTPUTS}")
 
     def utter(self, text: str) -> None:
         session = self.session
@@ -82,15 +84,18 @@ class Echo:
             # Made in its own thread: an echo can be still forming when the next arrives.
             try:
                 fragments = echoes.echo_text(self.claude, text, session.language)
-                print(f"  Echo: {fragments}")
+                echoes.note(f"echo made: {fragments[:60]!r}")
                 if session.closed.is_set():
                     return
                 audio = echoes.process(echoes.speak(self.eleven, session.voice_id, fragments))
                 # A session that ended while this was made does not hear it
                 if not session.closed.is_set():
                     session.player.feed(audio)
+                else:
+                    echoes.note("echo finished after the session ended — dropped")
             except Exception as e:
-                print(f"  [echo failed: {type(e).__name__}: {e}]")
+                body = getattr(e, "body", None)
+                echoes.note(f"echo failed: {type(e).__name__}: {body or e}")
 
         threading.Thread(target=make, daemon=True).start()
 
@@ -104,7 +109,7 @@ class Echo:
             session, self.session = self.session, None
         if session is not None:
             session.close()
-            print("  [session ended]")
+            echoes.note("session end")
 
 
 def handler(echo: Echo) -> type[BaseHTTPRequestHandler]:
@@ -120,6 +125,8 @@ def handler(echo: Echo) -> type[BaseHTTPRequestHandler]:
         def do_GET(self) -> None:
             if self.path == "/health":
                 self.reply(200, {"ok": True, "session": echo.session is not None})
+            elif self.path == "/status":
+                self.reply(200, {"session": echo.session is not None, "log": list(echoes.LOG)})
             else:
                 self.reply(404, {"error": "not found"})
 

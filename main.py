@@ -253,16 +253,21 @@ def run_ritual(
         wordless = Panel(display, "", style, after=wordless)
     try:
         # ── PRAYER ────────────────────────────────────────────────────────────
-        session.stage = PRAYER
         hearing: listen.Listener | None = None
         if os.path.exists(DEBUG_WAV):
+            session.stage = PRAYER
             print("\n  [Debug mode enabled: using existing recording in debug.wav]")
             prayer_audio = DEBUG_WAV
         else:
-            print("\n  [Prayer recording started. Double press ('e') to finish.]\n")
-            # The short prayer replaces the consent form while recording is
-            # already running, so nothing said during the refresh is lost.
+            # The prayer replaces the consent form, and nothing is recorded until
+            # it is there to be read: the microphone opens once the refresh is done.
             invitation = Panel(display, consent.PRAYERS[language], PRAYER_STYLE, dense=True)
+            print("\n  [Showing the prayer...]")
+            while invitation.thread.is_alive():
+                invitation.thread.join(0.1)
+                check(session)
+            session.stage = PRAYER
+            print("\n  [Prayer recording started. Double press ('e') to finish.]\n")
             # Transcribed as it is spoken, so the words are there at the final tap
             hearing = listen.Listener(eleven, language, rate=PRAYER_SAMPLE_RATE)
             try:

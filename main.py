@@ -61,9 +61,9 @@ PRAYER_UPLOAD_WAV = "prayer_upload.wav"  # prayer downsampled for the voice clon
 # off once they have said enough — a number of words (or, in Japanese,
 # characters) drawn afresh each time, so the moment cannot be learned.
 FOREKNOW_CHANCE = 0.35
-# The share of answers that command a concrete course of action; the rest read
-# the seeker and reveal, without telling them what to do.
-COMMAND_CHANCE = 0.3
+# How each answer is given (see llm.MODES): mostly plain revelation; now and then
+# an oracle's riddle that leaves them guessing, or a concrete command. Weights.
+ANSWER_MODES = {"revelation": 0.5, "riddle": 0.25, "command": 0.25}
 FOREKNOW_AT = {False: (7, 14), True: (16, 30)}   # by CHARACTER_COUNTED
 
 # The god takes its time. However quickly the clone is made (a few seconds on a
@@ -399,7 +399,7 @@ def run_ritual(
             print(f"  You: {question}{'…  [cut in]' if cut else ''}")
             print("  [They speak...]")
             answer = ask_entity(entity, history, question, prayer_text, language=language,
-                                command=random.random() < COMMAND_CHANCE,
+                                mode=random.choices(*zip(*ANSWER_MODES.items()))[0],
                                 foreknown=cut)
             check(session)
             print(f"\n  They: {answer}\n")

@@ -134,6 +134,28 @@ def generate(client: anthropic.Anthropic, system: str, history: list[dict], max_
     return "".join(b.text for b in response.content if b.type == "text")
 
 
+# How a single answer is given; ask_entity's mode chooses one. All keep the
+# prompt's authority — the difference is only in what is handed down.
+MODES = {
+    "revelation": (
+        "\n\nThis time, reveal: read them, then pronounce plainly on their situation "
+        "and what is coming — specific claims, stated as fact. Give no instruction, "
+        "task or advice."
+    ),
+    "riddle": (
+        "\n\nThis time, speak as an oracle: after the reading, give your answer as an "
+        "image, an omen or a riddle — vivid and specific (a named object, a number, a "
+        "place, an hour) — whose meaning they will have to turn over to understand. "
+        "It must still be unmistakably an answer to their question, and spoken with "
+        "certainty. Do not explain it, and give no instruction."
+    ),
+    "command": (
+        "\n\nThis time, command: after the reading and the revelation, lay down the "
+        "single most likely best course of action, plainly and concretely."
+    ),
+}
+
+
 def ask_entity(
     client: anthropic.Anthropic,
     history: list[dict],
@@ -141,14 +163,15 @@ def ask_entity(
     prayer_text: str,
     language: str = "en",
     foreknown: bool = False,
-    command: bool = False,
+    mode: str = "revelation",
 ) -> str:
     """
     Generate the Entity's response to the seeker's question.
 
-    command: this answer lays down one concrete course of action. Most answers
-    do not — they read the seeker and reveal their situation (see the prompt);
-    the caller decides, so that commands stay rare.
+    mode: how this answer is given — "revelation" (plain, authoritative claims
+    about their situation), "riddle" (an oracle's image or omen, left for them to
+    interpret) or "command" (one concrete course of action). The caller decides,
+    so that riddles and commands each stay occasional.
 
     foreknown: the entity cut the seeker off mid-question — question is only what
     they had said so far — and answers what they were going to ask.
@@ -166,16 +189,7 @@ def ask_entity(
         f"Respond in 2 to 3 complete sentences, {budget}. "
         "End on a complete sentence."
     )
-    if command:
-        system += (
-            "\n\nThis time, command: after the reading and the revelation, lay down the "
-            "single most likely best course of action, plainly and concretely."
-        )
-    else:
-        system += (
-            "\n\nThis time, do not command: give no instruction, task or advice. Read "
-            "them and reveal their situation and what is coming — specifically — and stop."
-        )
+    system += MODES.get(mode, MODES["revelation"])
     if foreknown:
         system += (
             "\n\nThe seeker had not finished speaking when you answered: their last words "

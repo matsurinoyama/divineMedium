@@ -13,6 +13,7 @@ from typing import Iterator
 # what a given key should mean right now.
 IDLE = "idle"
 PRAYER = "prayer"
+ARRIVAL = "arrival"     # prayer over, greeting not yet spoken: a press hastens the god
 DIALOGUE = "dialogue"
 FAREWELL = "farewell"
 
@@ -32,9 +33,10 @@ class Session:
         self.tap = threading.Event()     # 'e' during the prayer (a double press) — ends it
         self.end = threading.Event()     # 'e' — end the session, ask for a farewell
         self.abort = threading.Event()   # 'i'/'p' — drop everything, back to idle
+        self.hasten = threading.Event()  # 'e' while waiting for the god — it comes early, angered
 
     def reset(self) -> None:
-        for event in (self.tap, self.end, self.abort):
+        for event in (self.tap, self.end, self.abort, self.hasten):
             event.clear()
         self.stage = IDLE
 

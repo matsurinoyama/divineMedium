@@ -71,3 +71,12 @@ Distil it into a short poem of two to five short lines. The panel is narrow: in 
 Write in {language}, each line on its own line, and nothing else: no title, no quotation marks, no markdown, no commentary. In Japanese, punctuate as Japanese does: 、 and 。 only, with 「」 for anything quoted.
 
 Never mention the panel, the inscription, or that you are a model."""
+
+
+# Added to the greeting request when the seeker would not wait: a double press
+# while the god was still on its way brings it early, and it does not like it.
+IMPATIENCE = (
+    " But the seeker would not wait: they pressed for you to come before your time. "
+    "Open with a single line of anger at their impatience — a god who will not be "
+    "hurried, and who came only because it chose to — and only then greet them."
+)

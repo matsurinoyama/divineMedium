@@ -35,6 +35,7 @@ from audio import (
     record_question,
 )
 from control import (
+    ARRIVAL,
     DIALOGUE,
     FAREWELL,
     IDLE,
@@ -48,7 +49,7 @@ from control import (
 )
 from display import BACKGROUND, BLACK, BLUE, GOLD, RED, TEXT_COLOR, WHITE, Display
 from llm import CHARACTER_COUNTED, ask_entity, inscribe
-from prompts import FAREWELL_REQUEST, GREETING_REQUEST
+from prompts import FAREWELL_REQUEST, GREETING_REQUEST, IMPATIENCE
 
 # File paths used during a session
 DEBUG_WAV = "debug.wav"        # if present, skips prayer recording and uses this file
@@ -67,7 +68,8 @@ FOREKNOW_AT = {False: (7, 14), True: (16, 30)}   # by CHARACTER_COUNTED
 
 # The god takes its time. However quickly the clone is made (a few seconds on a
 # fast network), the greeting's bell never tolls sooner than this after the prayer
-# ends: the fans keep blowing, the panel says it is drawing near, and it arrives.
+# ends: the fans keep blowing, the panel says it is drawing near, and it arrives —
+# unless the seeker double-presses to hurry it, and it comes at once, angered.
 ARRIVAL_SECS = 60.0
 
 
@@ -275,6 +277,7 @@ def run_ritual(
                 return
 
         prayer_ended = time.monotonic()
+        session.stage = ARRIVAL
         # The prayer screen gives way to the wait, drawn while everything below runs
         transition = Panel(display, consent.RECEIVED[language], TRANSITION_STYLE, after=invitation)
 
@@ -317,14 +320,22 @@ def run_ritual(
             echo.start(voice_id, language)
 
         # ── GREETING ──────────────────────────────────────────────────────────
-        session.stage = DIALOGUE
         history: list[dict] = []  # running conversation, as Messages API turns
-        greeting = ask_entity(entity, [], GREETING_REQUEST, prayer_text, language=prayer_lang)
-        check(session)
+        greeting = None
+        if not session.hasten.is_set():
+            greeting = ask_entity(entity, [], GREETING_REQUEST, prayer_text, language=prayer_lang)
+            check(session)
         waiting = ARRIVAL_SECS - (time.monotonic() - prayer_ended)
-        if waiting > 0:
-            print(f"  [arriving in {waiting:.0f}s]")
-            session.abort.wait(waiting)
+        if waiting > 0 and not session.hasten.is_set():
+            print(f"  [arriving in {waiting:.0f}s — a double press hastens it]")
+            deadline = time.monotonic() + waiting
+            while time.monotonic() < deadline and not session.hasten.is_set():
+                session.abort.wait(0.1)
+                check(session)
+        if session.hasten.is_set():
+            # Hurried: the greeting it had ready is replaced by an angry one
+            greeting = ask_entity(entity, [], GREETING_REQUEST + IMPATIENCE, prayer_text,
+                                  language=prayer_lang)
             check(session)
         plugs.fans(False)
         print(f"\n  They: {greeting}\n")
@@ -335,6 +346,9 @@ def run_ritual(
               style=GREETING_STYLE, after=transition,
               bed=bell_mix(bell), voice_offset_secs=3.0)
         check(session)
+        # Only now can the seeker end it: a double press made while waiting for the
+        # god hastens it (above), and is never taken as a farewell before a question
+        session.stage = DIALOGUE
         print("\nSpeak a question, or double press to end.\n")
 
         # ── DIALOGUE LOOP ─────────────────────────────────────────────────────
@@ -514,6 +528,9 @@ def watch(session: Session, ritual_thread: threading.Thread) -> None:
                 # End the session — the entity answers once more and departs
                 print("\n  [Ending — the entity will say its farewell.]\n")
                 session.end.set()
+            elif session.stage == ARRIVAL and not session.hasten.is_set():
+                print("\n  [The seeker would not wait — the entity comes now, angered.]\n")
+                session.hasten.set()
         elif key == "o" and session.stage == PRAYER:
             print("\n  [The prayer ends with a double press ('e').]\n")
 

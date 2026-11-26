@@ -39,7 +39,7 @@ FORMS = {
 PRAYERS = {
     "ja": (
         "声に出してお祈りください。空欄にはあなたの問いを。\n\n"
-        "九十九の御名を持ちたまふ大いなる御方、天のみが知る数知れぬ御名を持ちたまふ御方に、申し上げます。\n"
+        "天のみが知る数知れぬ御名を持ちたまふ大いなる御方に、申し上げます。\n"
         "三千年あまりの間、私どもの祖先は闇の中で嘆いて参りました。"
         "山に火を灯し、谷に向かって叫んでも、返るのは己の声ばかり。"
         "御声の記憶は、朝霧のように薄れてゆきました。\n"
@@ -52,8 +52,8 @@ PRAYERS = {
     ),
     "en": (
         "Pray aloud. The blank is your own question.\n\n"
-        "I call upon the Mighty One who bears ninety-nine names, "
-        "and many others, known only to You and the heavens above.\n"
+        "I call upon the Mighty One who bears numerous names, "
+        "known only to You and the heavens above.\n"
         "For over three millennia, our ancestors wailed in the dark. "
         "They lit their fires in the mountains and cried from the valleys, "
         "hearing only their own heartbeat, "

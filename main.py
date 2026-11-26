@@ -60,12 +60,15 @@ PRAYER_UPLOAD_WAV = "prayer_upload.wav"  # prayer downsampled for the voice clon
 # off once they have said enough — a number of words (or, in Japanese,
 # characters) drawn afresh each time, so the moment cannot be learned.
 FOREKNOW_CHANCE = 0.35
+# The share of answers that command a concrete course of action; the rest read
+# the seeker and reveal, without telling them what to do.
+COMMAND_CHANCE = 0.3
 FOREKNOW_AT = {False: (7, 14), True: (16, 30)}   # by CHARACTER_COUNTED
 
 # The god takes its time. However quickly the clone is made (a few seconds on a
 # fast network), the greeting's bell never tolls sooner than this after the prayer
 # ends: the fans keep blowing, the panel says it is drawing near, and it arrives.
-ARRIVAL_SECS = 15.0
+ARRIVAL_SECS = 60.0
 
 
 def said(text: str, language: str) -> int:
@@ -382,6 +385,7 @@ def run_ritual(
             print(f"  You: {question}{'…  [cut in]' if cut else ''}")
             print("  [They speak...]")
             answer = ask_entity(entity, history, question, prayer_text, language=language,
+                                command=random.random() < COMMAND_CHANCE,
                                 foreknown=cut)
             check(session)
             print(f"\n  They: {answer}\n")

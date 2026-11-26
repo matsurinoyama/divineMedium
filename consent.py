@@ -19,16 +19,14 @@ FORMS = {
     "ja": (
         "声と言葉をアンソロピックとイレブンラボへ送り、声を写して神が語ります。"
         "録音と声は終わりに消しますが、両社のサーバーに残る場合があります。\n\n"
-        "二度押しで同意。\n"
-        "二度押しで祈り終わり。\n\n"
+        "二度押しで同意。\n\n"
         "Long press for English."
     ),
     "en": (
         "Your voice and words go to Anthropic and ElevenLabs, which clones your voice "
         "for the entity. We delete it all when you leave, but copies may remain "
         "on their servers.\n\n"
-        "Double press to consent.\n"
-        "Double press to end your prayer.\n\n"
+        "Double press to consent.\n\n"
         "長押しで日本語へ。"
     ),
 }

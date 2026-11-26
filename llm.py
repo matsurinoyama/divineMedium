@@ -72,8 +72,10 @@ def make_client() -> anthropic.Anthropic:
     return anthropic.Anthropic(max_retries=5)
 
 
-def breaks_character(text: str) -> bool:
-    return bool(BREAK_RE.search(text) or AI_RE.search(text))
+def breaks_character(text: str) -> str | None:
+    # The words that show the voice was stepped out of, or None.
+    match = BREAK_RE.search(text) or AI_RE.search(text)
+    return match.group(0) if match else None
 
 
 # What format_for_screen makes of an empty reply (a refusal, or nothing at all).
@@ -139,9 +141,14 @@ def ask_entity(
     prayer_text: str,
     language: str = "en",
     foreknown: bool = False,
+    command: bool = False,
 ) -> str:
     """
     Generate the Entity's response to the seeker's question.
+
+    command: this answer lays down one concrete course of action. Most answers
+    do not — they read the seeker and reveal their situation (see the prompt);
+    the caller decides, so that commands stay rare.
 
     foreknown: the entity cut the seeker off mid-question — question is only what
     they had said so far — and answers what they were going to ask.
@@ -159,6 +166,16 @@ def ask_entity(
         f"Respond in 2 to 3 complete sentences, {budget}. "
         "End on a complete sentence."
     )
+    if command:
+        system += (
+            "\n\nThis time, command: after the reading and the revelation, lay down the "
+            "single most likely best course of action, plainly and concretely."
+        )
+    else:
+        system += (
+            "\n\nThis time, do not command: give no instruction, task or advice. Read "
+            "them and reveal their situation and what is coming — specifically — and stop."
+        )
     if foreknown:
         system += (
             "\n\nThe seeker had not finished speaking when you answered: their last words "
@@ -177,7 +194,8 @@ def ask_entity(
         answer = format_for_screen(generate(client, system, history, max_tokens))
         if answer != EMPTY_ANSWER and not breaks_character(answer):
             break
-        print(f"  [entity stepped out of the voice — discarded: {answer[:80]}...]")
+        why = breaks_character(answer) or "no answer"
+        print(f"  [entity stepped out of the voice ({why!r}) — discarded: {answer[:80]}...]")
         system += (
             "\n\nYou have just begun to step outside the voice; that draft was discarded "
             "and the seeker never saw it. Answer again, only as god."

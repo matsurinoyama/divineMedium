@@ -238,6 +238,8 @@ The echo is tuhanKami's second voice: broken, looping fragments of every greetin
 
 The Pi sends only commands and text (`echo.py`): `start` with the clone's voice id, `utter` with each utterance, `fade` with the bells' length, and `end`. The Mac writes the fragments with Claude, synthesises them in the same voice, and picks a speaker at random for each one; every new echo dims the ones still sounding. If `ECHO_HOST` is unset or the Mac can't be reached, the ritual carries on without the echo. `end` is sent before the Pi deletes the clone.
 
+Beneath the echoes, the cave: `CAVESOUNDS.mp3` (in the project folder; not in git — it is over GitHub's 100 MB limit) loops on every speaker from the moment the server starts, between sessions too, while the room waits. Each speaker plays its own stretch of the recording, from a random point, so the cave surrounds rather than coming from the middle. The echoes play over it, and the farewell fade takes only the echoes; the cave plays on. It needs `ffmpeg` (`brew install ffmpeg`).
+
 On the Mac:
 
 ```bash
@@ -257,6 +259,8 @@ ECHO_OUTPUTS=5:0:4,5:1:4,5:2:4,5:3:4   # device:channel:channels — one 4-chann
 # ECHO_OUTPUTS=6:0:2,6:1:2,4:0+1:2   # 0+1: one speaker on both sides of a device (same echo on L and R)
 # ECHO_PORT=8765
 # ECHO_MODEL=claude-haiku-5-5
+# CAVE_VOLUME=1.0                  # the cave beneath the echoes: 1.0 as recorded, 0 for none
+# CAVE_FILE=/path/to/other.mp3     # default: ../CAVESOUNDS.mp3
 ```
 
 Then run `python server.py`, and set `ECHO_HOST=<mac>.local:8765` in the Pi's `.env`. If `ECHO_OUTPUTS` is unset, the echo plays on the Mac's default left and right outputs, for testing.

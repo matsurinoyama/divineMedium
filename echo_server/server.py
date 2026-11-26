@@ -1,7 +1,8 @@
 """
 The echo server, run on the Mac beside the surrounding speakers. The Pi tells it
 what the entity says; it answers with echoes, in the seeker's cloned voice, on
-the four speakers around the room. The bells stay on the Pi.
+the four speakers around the room. The bells stay on the Pi. From the moment it
+starts, the cave (CAVESOUNDS.mp3) loops on every speaker; the echoes play over it.
 
   POST /start  {"voice_id": ..., "language": "ja"}   a session begins
   POST /utter  {"text": ...}                         the entity has spoken
@@ -20,7 +21,6 @@ import json
 import os
 import sys
 import threading
-import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from dotenv import load_dotenv
@@ -38,25 +38,19 @@ END_FADE_SECS = 2.0
 
 
 class Session:
-    def __init__(self, voice_id: str, language: str) -> None:
+    def __init__(self, voice_id: str, language: str, player: echoes.EchoPlayer) -> None:
         self.voice_id = voice_id
         self.language = language
-        self.player = echoes.EchoPlayer()
+        self.player = player
         self.closed = threading.Event()
-        self.player.start()
+        player.reset()
 
     def close(self) -> None:
-        # Fade whatever is still sounding, then close the streams — in the background.
+        # Fade the echoes still sounding, in the background; the cave plays on.
         if self.closed.is_set():
             return
         self.closed.set()
         self.player.fade_out(END_FADE_SECS)
-
-        def stop() -> None:
-            time.sleep(END_FADE_SECS + 0.2)
-            self.player.stop()
-
-        threading.Thread(target=stop, daemon=True).start()
 
 
 class Echo:
@@ -65,6 +59,9 @@ class Echo:
         self.eleven = ElevenLabs(api_key=os.environ["ELEVENLABS_API_KEY"])
         self.lock = threading.Lock()
         self.session: Session | None = None
+        # The speakers stay open for as long as the server runs, the cave beneath
+        self.player = echoes.EchoPlayer()
+        self.player.start()
 
     def start(self, voice_id: str, language: str) -> None:
         with self.lock:
@@ -72,7 +69,7 @@ class Echo:
                 # The Pi never ended the last one (a crash, a power cut)
                 self.session.close()
             echoes.LOG.clear()
-            self.session = Session(voice_id, language)
+            self.session = Session(voice_id, language, self.player)
         echoes.note(f"session start: {language} · outputs {echoes.ECHO_OUTPUTS}")
 
     def utter(self, text: str) -> None:
@@ -166,6 +163,7 @@ def main() -> None:
         server.serve_forever()
     except KeyboardInterrupt:
         echo.end()
+        echo.player.stop()
         print("\n  [Exiting.]")
 
 

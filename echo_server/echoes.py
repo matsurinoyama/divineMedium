@@ -3,16 +3,20 @@ The entity's echo, ported from tuhanKami: broken fragments of each utterance,
 spoken in the seeker's cloned voice (unstable, slow), pitched down, reverberated,
 swelled in through the reverse reverb, and thrown to one of the surrounding
 speakers at random. Every new echo dims the ones still sounding, so old echoes
-fade as new ones arrive. Runs on the Mac; the Pi only sends the words.
+fade as new ones arrive. Beneath them, always, the cave: CAVESOUNDS.mp3 looping
+on every speaker, between sessions too. Runs on the Mac; the Pi only sends the words.
 """
 
 from __future__ import annotations
 
 import collections
+import functools
 import os
 import queue
 import random
 import re
+import shutil
+import subprocess
 import threading
 import time
 
@@ -79,6 +83,79 @@ def parse_outputs(spec: str | None) -> list[Output]:
 ECHO_OUTPUTS = parse_outputs(os.getenv("ECHO_OUTPUTS"))
 
 
+# ── The cave ──────────────────────────────────────────────────────────────────
+# The room's ground: a long cave recording, looping beneath the echoes for as long
+# as the server runs. The recording is mono, so each speaker gets its own decoder,
+# started at its own random point in it: the speakers play different stretches of
+# the cave, and the room sounds wide rather than one sound from the middle.
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+CAVE_FILE = os.getenv("CAVE_FILE") or os.path.join(os.path.dirname(HERE), "CAVESOUNDS.mp3")
+CAVE_VOLUME = float(os.getenv("CAVE_VOLUME", "1.0"))   # 1.0: as recorded; 0: no cave
+CAVE_FADE_IN_SECS = 3.0
+
+
+@functools.cache
+def cave_duration() -> float:
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "csv=p=0", CAVE_FILE],
+            capture_output=True, text=True, timeout=10)
+        return float(out.stdout.strip())
+    except Exception:
+        return 0.0
+
+
+class Cave:
+    """CAVE_FILE decoded by ffmpeg, endlessly, as mono float samples — one speaker's."""
+
+    def __init__(self, label: str) -> None:
+        self.label = label
+        self.proc: subprocess.Popen | None = None
+        self.failures = 0
+        self.dead = not self.available()
+
+    @staticmethod
+    def available() -> bool:
+        return CAVE_VOLUME > 0 and os.path.isfile(CAVE_FILE) and shutil.which("ffmpeg") is not None
+
+    def open(self) -> None:
+        offset = random.uniform(0, max(0.0, cave_duration() - 60))
+        # asetpts: fresh timestamps, so the loop back to the start is seamless
+        self.proc = subprocess.Popen(
+            ["ffmpeg", "-nostdin", "-v", "error", "-stream_loop", "-1",
+             "-ss", f"{offset:.1f}", "-i", CAVE_FILE, "-af", "asetpts=N/SR/TB",
+             "-f", "f32le", "-ac", "1", "-ar", str(SAMPLE_RATE), "-"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        note(f"cave on {self.label} from {int(offset) // 60}:{int(offset) % 60:02d}")
+
+    def read(self, frames: int) -> np.ndarray | None:
+        # frames samples, at CAVE_VOLUME; None if there is no cave to play.
+        if self.dead:
+            return None
+        if self.proc is None:
+            self.open()
+        need = frames * 4
+        data = self.proc.stdout.read(need)
+        if len(data) < need:
+            # ffmpeg ended: start again elsewhere, unless it keeps failing
+            self.close()
+            self.failures += 1
+            if self.failures >= 3:
+                self.dead = True
+                note(f"cave on {self.label} stopped: ffmpeg could not play {CAVE_FILE}")
+            return np.zeros(frames, dtype="float32")
+        self.failures = 0
+        return np.frombuffer(data, dtype="float32") * CAVE_VOLUME
+
+    def close(self) -> None:
+        if self.proc is not None:
+            self.proc.kill()
+            self.proc.wait()
+            self.proc = None
+
+
 # ── Processing (tuhanKami's audio.py, scaled from 16 kHz to SAMPLE_RATE) ─────
 
 def scaled(samples_at_16k: int) -> int:
@@ -132,20 +209,28 @@ def process(pcm: bytes, volume: float = 0.65) -> np.ndarray:
 
 # ── Playback (tuhanKami's SpeakerPlayer / BackgroundEchoPlayer) ──────────────
 
+CLEAR = "clear"   # queue sentinel: drop every layer (None dims them)
+
+
 class SpeakerPlayer:
     """
     One output stream per device, its channels mixed independently. Each clip
-    loops until new clips have dimmed it below VOL_THRESHOLD.
+    loops until new clips have dimmed it below VOL_THRESHOLD. The cave plays
+    beneath — one Cave per speaker — untouched by the echoes' master volume.
     """
 
     CHUNK = int(SAMPLE_RATE * 0.05)
     MAX_LAYERS = 4
     VOL_THRESHOLD = 0.05
 
-    def __init__(self, device: int | str | None, num_channels: int, master: list) -> None:
+    def __init__(self, device: int | str | None, num_channels: int, master: list,
+                 speakers: list[tuple[int, ...]] | None = None) -> None:
         self.device = device
         self.num_channels = num_channels
         self.master = master
+        # One cave per speaker on this device, played on all of that speaker's channels
+        self.caves = [(Cave(f"{device!r} ch {'+'.join(map(str, chs))}"), chs)
+                      for chs in (speakers or [])]
         self.pending: list[queue.Queue] = [queue.Queue() for _ in range(num_channels)]
         self.layers: list[list[dict]] = [[] for _ in range(num_channels)]
         self.stop_event = threading.Event()
@@ -159,6 +244,10 @@ class SpeakerPlayer:
         for ch in range(self.num_channels):
             self.pending[ch].put(None)
 
+    def clear(self) -> None:
+        for ch in range(self.num_channels):
+            self.pending[ch].put(CLEAR)
+
     def start(self) -> None:
         self.stop_event.clear()
         self.thread = threading.Thread(target=self.loop, daemon=True)
@@ -169,6 +258,8 @@ class SpeakerPlayer:
         if self.thread:
             self.thread.join(timeout=3)
             self.thread = None
+        for cave, _ in self.caves:
+            cave.close()
 
     def loop(self) -> None:
         # A device can refuse to open (a USB adapter waking up, two opened at once)
@@ -184,8 +275,17 @@ class SpeakerPlayer:
         with sd.OutputStream(samplerate=SAMPLE_RATE, device=self.device,
                              channels=self.num_channels, dtype="float32") as stream:
             note(f"speaker {self.device!r} open ({self.num_channels} ch)")
+            opened = time.monotonic()
             while not self.stop_event.is_set():
                 frame = np.zeros((self.CHUNK, self.num_channels), dtype="float32")
+                # The cave, fading in whenever the stream (re)opens rather than clicking on
+                cave_gain = min(1.0, (time.monotonic() - opened) / CAVE_FADE_IN_SECS)
+                beneath = np.zeros((self.CHUNK, self.num_channels), dtype="float32")
+                for cave, chs in self.caves:
+                    sound = cave.read(self.CHUNK)
+                    if sound is not None:
+                        for c in chs:
+                            beneath[:, c] += sound * cave_gain
                 for ch in range(self.num_channels):
                     try:
                         while True:
@@ -195,13 +295,13 @@ class SpeakerPlayer:
                                     layer["vol"] *= 0.4
                                 self.layers[ch] = [l for l in self.layers[ch]
                                                    if l["vol"] >= self.VOL_THRESHOLD]
+                            elif isinstance(item, str):   # CLEAR
+                                self.layers[ch] = []
                             else:
                                 self.layers[ch].append({"audio": item, "pos": 0, "vol": 1.0})
                                 self.layers[ch] = self.layers[ch][-self.MAX_LAYERS:]
                     except queue.Empty:
                         pass
-                    if not self.layers[ch]:
-                        continue
                     mixed = np.zeros(self.CHUNK, dtype="float32")
                     for layer in self.layers[ch]:
                         pos = layer["pos"]
@@ -212,6 +312,7 @@ class SpeakerPlayer:
                         mixed += chunk * layer["vol"]
                         layer["pos"] = end if end < len(layer["audio"]) else 0
                     mixed *= self.master[0]
+                    mixed += beneath[:, ch]   # the echo is played over the cave
                     peak = float(np.max(np.abs(mixed)))
                     if peak > 1.0:
                         mixed /= peak
@@ -220,16 +321,37 @@ class SpeakerPlayer:
 
 
 class EchoPlayer:
-    """All ECHO_OUTPUTS, one SpeakerPlayer per device, with a shared master volume."""
+    """
+    All ECHO_OUTPUTS, one SpeakerPlayer per device, with a shared master volume
+    for the echoes. Opened once, for as long as the server runs: the cave plays
+    throughout, and each session's echoes come and go over it.
+    """
 
     def __init__(self) -> None:
         self.master: list = [1.0]
         self.fading = threading.Event()
-        players: dict[tuple, SpeakerPlayer] = {}
-        for dev, _, nch in ECHO_OUTPUTS:
-            players.setdefault((dev, nch), SpeakerPlayer(dev, nch, self.master))
+        self.generation = 0   # bumped by reset(): an older fade stops touching master
+        self.lock = threading.Lock()
+        speakers: dict[tuple, list[tuple[int, ...]]] = {}
+        for dev, chs, nch in ECHO_OUTPUTS:
+            speakers.setdefault((dev, nch), []).append(chs)
+        players = {key: SpeakerPlayer(key[0], key[1], self.master, chs)
+                   for key, chs in speakers.items()}
         self.players = players
         self.slots = [(players[(dev, nch)], chs) for dev, chs, nch in ECHO_OUTPUTS]
+        if not Cave.available():
+            note(f"no cave (CAVE_VOLUME={CAVE_VOLUME}, file {CAVE_FILE} "
+                 f"{'found' if os.path.isfile(CAVE_FILE) else 'missing'}, "
+                 f"ffmpeg {'found' if shutil.which('ffmpeg') else 'missing'})")
+
+    def reset(self) -> None:
+        # A new session: any echo still sounding is dropped, and new ones play at full volume.
+        with self.lock:
+            self.generation += 1
+            self.fading.clear()
+            for player in self.players.values():
+                player.clear()
+            self.master[0] = 1.0
 
     def feed(self, audio: np.ndarray) -> None:
         # Dim everything already sounding, then send the new echo to one speaker at random.
@@ -243,18 +365,27 @@ class EchoPlayer:
              f"{len(audio) / SAMPLE_RATE:.1f}s, peak {peak:.2f}, master {self.master[0]:.2f}")
 
     def fade_out(self, secs: float) -> None:
-        # Fade every speaker to silence over secs, in the background.
+        # Fade the echoes to silence over secs, in the background, then drop them.
+        # The cave plays on.
         if self.fading.is_set():
             return
         self.fading.set()
+        generation = self.generation
         start = self.master[0]
         steps = max(1, int(secs / 0.05))
 
         def run() -> None:
             for i in range(steps + 1):
-                self.master[0] = start * float(np.cos(i / steps * np.pi / 2))
+                with self.lock:
+                    if self.generation != generation:
+                        return   # a new session has begun
+                    self.master[0] = start * float(np.cos(i / steps * np.pi / 2))
                 time.sleep(0.05)
-            self.master[0] = 0.0
+            with self.lock:
+                if self.generation == generation:
+                    self.master[0] = 0.0
+                    for player in self.players.values():
+                        player.clear()
 
         threading.Thread(target=run, daemon=True).start()
 

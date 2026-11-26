@@ -295,6 +295,22 @@ class ReverseReverb:
         return np.concatenate([y, np.zeros(int(self.TAIL_SECS * PLAYBACK_RATE), dtype="float32")])
 
 
+class Dry:
+    """The voice as it was synthesised: ReverseReverb's interface, no effect."""
+
+    def __init__(self) -> None:
+        self.carry = b""   # half a 16-bit sample left over from the last chunk
+
+    def feed(self, pcm: bytes) -> np.ndarray:
+        pcm = self.carry + pcm
+        cut = len(pcm) - len(pcm) % 2
+        self.carry = pcm[cut:]
+        return pcm_to_float(pcm[:cut])
+
+    def finish(self) -> np.ndarray:
+        return np.zeros(int(ReverseReverb.TAIL_SECS * PLAYBACK_RATE), dtype="float32")
+
+
 @functools.lru_cache(maxsize=None)
 def load_bell(bell_path: str) -> np.ndarray:
     # Load a bell audio file, mix to mono, and resample to PLAYBACK_RATE. Cached,
@@ -349,9 +365,11 @@ def play_stream(
     *stops: threading.Event,
     bed: np.ndarray | None = None,
     voice_offset_secs: float = 0.0,
+    reverb: bool = True,
 ) -> None:
     """
-    Play speech as it is synthesised, through the reverse reverb, optionally over
+    Play speech as it is synthesised, through the reverse reverb (or dry, with
+    reverb=False — the farewell, the plain voice), optionally over
     a bed (the greeting's bell) that starts at once while the voice comes in
     voice_offset_secs later — or later still, if the voice is not ready by then.
     Blocks until both are done or any of stops is set.
@@ -365,15 +383,15 @@ def play_stream(
     q: queue.Queue = queue.Queue()
 
     def produce() -> None:
-        reverb = ReverseReverb()
+        effect = ReverseReverb() if reverb else Dry()
         try:
             for pcm in speech:
                 if any(e.is_set() for e in stops):
                     return
-                q.put(reverb.feed(pcm))
+                q.put(effect.feed(pcm))
         except Exception as e:
             print(f"  [voice stream broke off: {type(e).__name__}: {e}]")
-        q.put(reverb.finish())
+        q.put(effect.finish())
         q.put(END)
 
     voice_done = speech is None

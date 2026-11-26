@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import random
 import threading
+import time
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 
@@ -61,6 +62,11 @@ PRAYER_UPLOAD_WAV = "prayer_upload.wav"  # prayer downsampled for the voice clon
 FOREKNOW_CHANCE = 0.35
 FOREKNOW_AT = {False: (7, 14), True: (16, 30)}   # by CHARACTER_COUNTED
 
+# The god takes its time. However quickly the clone is made (a few seconds on a
+# fast network), the greeting's bell never tolls sooner than this after the prayer
+# ends: the fans keep blowing, the panel says it is drawing near, and it arrives.
+ARRIVAL_SECS = 15.0
+
 
 def said(text: str, language: str) -> int:
     # How much of a question has been heard: words, or characters where there are no spaces.
@@ -109,7 +115,12 @@ class Panel:
     """
 
     def __init__(
-        self, display: Display, text: str, style: Style, after: Panel | None = None
+        self,
+        display: Display,
+        text: str,
+        style: Style,
+        after: Panel | None = None,
+        dense: bool = False,
     ) -> None:
         self.failure: BaseException | None = None
         self.started = threading.Event()   # drawing has begun (or it was skipped)
@@ -118,7 +129,7 @@ class Panel:
         if after is not None:
             after.supersede()
         self.thread = threading.Thread(
-            target=self.run, args=(display, text, style, after), daemon=True
+            target=self.run, args=(display, text, style, after, dense), daemon=True
         )
         self.thread.start()
 
@@ -128,7 +139,9 @@ class Panel:
             if not self.started.is_set():
                 self.skipped = True
 
-    def run(self, display: Display, text: str, style: Style, after: Panel | None) -> None:
+    def run(
+        self, display: Display, text: str, style: Style, after: Panel | None, dense: bool
+    ) -> None:
         if after is not None:
             after.thread.join()
         with self.lock:
@@ -136,7 +149,7 @@ class Panel:
             if self.skipped:
                 return
         try:
-            display.show(text, *style)
+            display.show(text, *style, dense=dense)
         except BaseException as e:
             self.failure = e
 
@@ -158,6 +171,7 @@ def utter(
     after: Panel | None = None,
     bed: np.ndarray | None = None,
     voice_offset_secs: float = 0.0,
+    reverb: bool = True,
 ) -> None:
     """
     One utterance, written and spoken, each the moment it is ready and neither
@@ -179,7 +193,7 @@ def utter(
     voice = threading.Thread(
         target=play_stream,
         args=(speech(eleven, voice_id, text), *stops),
-        kwargs={"bed": bed, "voice_offset_secs": voice_offset_secs},
+        kwargs={"bed": bed, "voice_offset_secs": voice_offset_secs, "reverb": reverb},
         daemon=True,
     )
     voice.start()
@@ -206,7 +220,7 @@ def run_ritual(
 
     Stages:
       1. Prayer — a short prayer to read appears on the panel while recording
-         runs until 'o', or debug.wav is loaded instead
+         runs until a double press ('e'), or debug.wav is loaded instead
       2. Transcription — Gemini → prayer_text
       3. Voice clone — one ElevenLabs IVC voice from the prayer
       4. Greeting — the entity's welcome, drawn from the prayer, on the panel and
@@ -240,10 +254,10 @@ def run_ritual(
             print("\n  [Debug mode enabled: using existing recording in debug.wav]")
             prayer_audio = DEBUG_WAV
         else:
-            print("\n  [Prayer recording started. Press 'o' to finish.]\n")
+            print("\n  [Prayer recording started. Double press ('e') to finish.]\n")
             # The short prayer replaces the consent form while recording is
             # already running, so nothing said during the refresh is lost.
-            invitation = Panel(display, consent.PRAYERS[language], PRAYER_STYLE)
+            invitation = Panel(display, consent.PRAYERS[language], PRAYER_STYLE, dense=True)
             # Transcribed as it is spoken, so the words are there at the final tap
             hearing = listen.Listener(eleven, language, rate=PRAYER_SAMPLE_RATE)
             try:
@@ -257,6 +271,7 @@ def run_ritual(
                 print("  (nothing was offered — returning to idle)\n")
                 return
 
+        prayer_ended = time.monotonic()
         # The prayer screen gives way to the wait, drawn while everything below runs
         transition = Panel(display, consent.RECEIVED[language], TRANSITION_STYLE, after=invitation)
 
@@ -265,8 +280,11 @@ def run_ritual(
             if eleven is None:
                 return None
             try:
+                started = time.monotonic()
                 compress_for_ivc(prayer_audio, PRAYER_UPLOAD_WAV)
-                return tts.clone_voice(eleven, PRAYER_UPLOAD_WAV)
+                voice = tts.clone_voice(eleven, PRAYER_UPLOAD_WAV)
+                print(f"  [cloned in {time.monotonic() - started:.1f}s]")
+                return voice
             except Exception as e:
                 print(f"  [voice clone failed — continuing text-only: {type(e).__name__}: {e}]")
                 return None
@@ -298,9 +316,14 @@ def run_ritual(
         # ── GREETING ──────────────────────────────────────────────────────────
         session.stage = DIALOGUE
         history: list[dict] = []  # running conversation, as Messages API turns
-        plugs.fans(False)
         greeting = ask_entity(entity, [], GREETING_REQUEST, prayer_text, language=prayer_lang)
         check(session)
+        waiting = ARRIVAL_SECS - (time.monotonic() - prayer_ended)
+        if waiting > 0:
+            print(f"  [arriving in {waiting:.0f}s]")
+            session.abort.wait(waiting)
+            check(session)
+        plugs.fans(False)
         print(f"\n  They: {greeting}\n")
         # The god has arrived: the lights go out as the bell tolls
         plugs.lights(False)
@@ -376,8 +399,10 @@ def run_ritual(
         farewell = ask_entity(entity, history, FAREWELL_REQUEST, prayer_text, language=prayer_lang)
         check(session)
         print(f"\n  They: {farewell}\n")
+        # The god's last words in the seeker's own voice, plain — no reverb.
+        # (The echoes on the Mac keep theirs.)
         utter(display, entity, eleven, voice_id, farewell, language, session.abort,
-              style=FAREWELL_STYLE, after=wordless)
+              style=FAREWELL_STYLE, after=wordless, reverb=False)
         wordless = None
         plugs.fans(False)
         check(session)
@@ -439,10 +464,9 @@ def main() -> None:
         while True:
             print(
                 "\nWaiting for consent...\n"
-                "  e  consent and begin the prayer / end the ritual (farewell)\n"
+                "  e  consent and begin the prayer / end the prayer / end the ritual (farewell)\n"
                 "  i  switch the form between Japanese and English / interrupt and reset\n"
-                "  o  end the prayer\n"
-                "  (PiSugar button: tap = o, double tap = e, long press = i)\n"
+                "  (PiSugar button: double tap = e, long press = i)\n"
             )
 
             language = consent.wait_for_consent(display, language)
@@ -478,15 +502,16 @@ def watch(session: Session, ritual_thread: threading.Thread) -> None:
             ritual_thread.join()
             break
         elif key == "e":
-            # End the session — the entity answers once more and departs
-            if session.stage == DIALOGUE:
+            if session.stage == PRAYER:
+                # A double press ends the prayer — not a single tap, which is too
+                # easily given by accident halfway through a minute of reading
+                session.tap.set()
+            elif session.stage == DIALOGUE:
+                # End the session — the entity answers once more and departs
                 print("\n  [Ending — the entity will say its farewell.]\n")
                 session.end.set()
-            else:
-                print("\n  ['e' only ends the ritual during the dialogue.]\n")
         elif key == "o" and session.stage == PRAYER:
-            # Ends the prayer (questions are found by speech detection)
-            session.tap.set()
+            print("\n  [The prayer ends with a double press ('e').]\n")
 
 
 if __name__ == "__main__":

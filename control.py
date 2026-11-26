@@ -29,7 +29,7 @@ class Session:
 
     def __init__(self) -> None:
         self.stage = IDLE
-        self.tap = threading.Event()     # 'o' — ends the prayer
+        self.tap = threading.Event()     # 'e' during the prayer (a double press) — ends it
         self.end = threading.Event()     # 'e' — end the session, ask for a farewell
         self.abort = threading.Event()   # 'i'/'p' — drop everything, back to idle
 

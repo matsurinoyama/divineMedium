@@ -2,8 +2,8 @@
 # PiSugar button → divineMedium. pisugar-server runs this (as root) on a tap and
 # it forwards the tap to main.py as the key the keyboard would have sent:
 #
-#   single tap  → o   end the prayer
-#   double tap  → e   consent (on the consent form) / end the ritual (the entity gives a farewell)
+#   single tap  → o   nothing (the prayer used to end on it; now it is a double tap)
+#   double tap  → e   consent (on the consent form) / end the prayer / end the ritual (the entity gives a farewell)
 #   long tap    → i   switch Japanese / English (on the consent form) / interrupt and reset
 #
 # main.py creates button.fifo next to this script while it runs and reads it

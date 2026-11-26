@@ -24,17 +24,17 @@ Questions are found by the same voice-activity detection, but transcribed live a
 ## How It Works
 
 0. **Consent** — Between sessions the panel shows a consent form, in Japanese. A long press switches it to English (and back); the language the participant consents in is the session's language. A double press gives consent.
-1. **Prayer** — Recording starts as soon as consent is given. The participant speaks a prayer aloud and taps once to end it. The entity learns the seeker's voice and concerns from what they offer.
-2. **Arrival** — As the prayer ends, the panel turns white on black: *Your prayer is heard. Be still, and wait. I am drawing near.* Meanwhile ElevenLabs clones the voice from it; the prayer was transcribed as it was spoken, so its words are already there. A bell tolls; three seconds in, the entity speaks a greeting drawn from the prayer, in the seeker's own voice, while the panel paints the same words (about twenty seconds).
+1. **Prayer** — Recording starts as soon as consent is given. The panel shows the invocation, set small to fit: about a minute to read aloud, enough for a good clone, with one blank for the seeker's own question (*So tell me this: ______?*). The participant reads it aloud and double-presses to end it. The entity learns the seeker's voice and their question from what they offer.
+2. **Arrival** — As the prayer ends, the panel turns white on black: *Your prayer is heard. Be still, and wait. I am drawing near.* Meanwhile ElevenLabs clones the voice from it; the prayer was transcribed as it was spoken, so its words are already there. The clone takes only seconds, but the god takes its time: the bell never tolls sooner than 15 seconds after the prayer (`ARRIVAL_SECS` in `main.py`). A bell tolls; three seconds in, the entity speaks a greeting drawn from the prayer, in the seeker's own voice, while the panel paints the same words (about twenty seconds).
 3. **Dialogue** — The participant simply speaks; the microphone detects the question and it is transcribed as it is spoken. The panel goes blank as they begin and red when the question is taken. On about a third of questions, chosen at random, the entity cuts in once enough has been said — as a god that already knows what you are going to ask — and answers the whole question from its first half. The voice speaks the whole answer; the panel shows a short poem distilled from it, in the same voice, so a long answer still reads whole on one screen.
-4. **Departure** — A double press. The entity speaks and prints a farewell, three bells toll, the voice clone and the recordings are deleted, and the consent form returns. No trace remains.
+4. **Departure** — A double press. The entity speaks and prints a farewell, in the seeker's plain cloned voice with no reverb (the echoes keep theirs), three bells toll, the voice clone and the recordings are deleted, and the consent form returns. No trace remains.
 
 ### Signal flow
 
 ```
 [consent.py] wait_for_consent — the form, until a double press ('e')
        ↓
-  [audio.py]  record_prayer — 44.1 kHz, until a single tap ('o')
+  [audio.py]  record_prayer — 44.1 kHz, until a double press ('e')
        ↓
   [listen.py] Listener — the prayer transcribed live, ready at the tap
   [tts.py]    clone_voice — ElevenLabs IVC from the prayer
@@ -150,7 +150,7 @@ python3 main.py
 
 1. Start `python main.py` before participants arrive. The consent form appears on the panel.
 2. The participant may long-press to switch the form to English, then double-presses to consent. Recording starts immediately.
-3. The participant speaks their prayer and taps once to end it.
+3. The participant speaks their prayer and double-presses to end it.
 4. A bell, then the greeting is spoken and appears on the panel. From here the participant speaks freely; each question is detected, answered aloud and on its own screen.
 5. A double press ends the session: a farewell, three bells, and the consent form returns.
 6. Press `Ctrl-C` to stop the program.
@@ -159,14 +159,14 @@ python3 main.py
 
 | Key | Effect |
 | --- | --- |
-| `e` | On the consent form, consents and begins the prayer; in the dialogue, ends the ritual with a farewell (and cuts short an answer being spoken) |
+| `e` | On the consent form, consents and begins the prayer; during the prayer, ends it; in the dialogue, ends the ritual with a farewell (and cuts short an answer being spoken) |
 | `i`/`p` | On the consent form, switches Japanese / English; otherwise interrupts and returns to the consent form |
-| `o` | Ends the prayer recording (questions are found by speech detection) |
+| `o` | Nothing (the prayer ends with `e`, a double press; questions are found by speech detection) |
 | `Ctrl-C` | Exits |
 
 ### PiSugar button
 
-`pisugar_button.sh` turns the PiSugar's custom button into the keyboard keys: single tap is `o`, double tap is `e`, long press is `i` — so a long press is the language switch on the consent form and an interrupt everywhere else. pisugar-server runs the command; the script forwards the tap through `button.fifo`, which `main.py` creates while it runs. In the PiSugar web UI (port 8421), enable each tap under the custom button function and set its shell to:
+`pisugar_button.sh` turns the PiSugar's custom button into the keyboard keys: single tap is `o` (unused), double tap is `e`, long press is `i` — so a double press consents, ends the prayer and ends the ritual, and a long press is the language switch on the consent form and an interrupt everywhere else. pisugar-server runs the command; the script forwards the tap through `button.fifo`, which `main.py` creates while it runs. In the PiSugar web UI (port 8421), enable each tap under the custom button function and set its shell to:
 
 ```
 /home/matsurinoyama/divineMedium/pisugar_button.sh single

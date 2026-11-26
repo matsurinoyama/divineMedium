@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import os
 import re
 import sys
@@ -49,6 +51,22 @@ PARAGRAPH_GAP = 0.5
 # brush face with thin, broken strokes, and below ~28px those strokes start
 # dropping out of a 1-bit-per-colour panel altogether.
 FONT_SIZES = [46, 40, 35, 31, 28]
+
+
+
+@dataclass(frozen=True)
+class Setting:
+    sizes: list[int]          # the ladder, largest first
+    line_spacing: float       # multiple of font size, between horizontal lines
+    column_spacing: float     # multiple of font size, between vertical columns
+
+
+NORMAL = Setting(FONT_SIZES, LINE_SPACING, COLUMN_SPACING)
+# The prayer alone is set small and close: a minute of text to read aloud cannot
+# fit one screen at 28px (about 140 characters set vertically, 320 across). Below
+# about 20px the brush strokes begin to break up, so the ladder stops at 18.
+# Only screens shown with dense=True use it; answers never do.
+DENSE = Setting([24, 22, 21, 20, 19, 18], line_spacing=1.22, column_spacing=1.2)
 
 # A semi-cursive brush face — the hand of something writing on the panel rather
 # than a machine printing to it.
@@ -229,11 +247,17 @@ def unbroken_passes(text: str) -> tuple[bool, ...]:
     return (True, False) if hard_lines(text) > 1 else (False,)
 
 
-def sizes(unbroken: bool) -> list[int]:
-    return [s for s in FONT_SIZES if s >= UNBROKEN_MIN_SIZE] if unbroken else FONT_SIZES
+def sizes(unbroken: bool, ladder: list[int]) -> list[int]:
+    # A ladder that lies wholly below UNBROKEN_MIN_SIZE (the dense one) tries its
+    # lines unbroken at every size it has.
+    if not unbroken:
+        return ladder
+    return [s for s in ladder if s >= UNBROKEN_MIN_SIZE] or ladder
 
 
-def layout(text: str, path: str | None = None) -> tuple[list[str], ImageFont.FreeTypeFont]:
+def layout(
+    text: str, path: str | None = None, setting: Setting = NORMAL
+) -> tuple[list[str], ImageFont.FreeTypeFont]:
     """
     Pick the largest font size whose wrapped text fits one screen.
 
@@ -247,18 +271,18 @@ def layout(text: str, path: str | None = None) -> tuple[list[str], ImageFont.Fre
     avail_h = EPD_HEIGHT - 2 * MARGIN_Y
 
     for unbroken in unbroken_passes(text):
-        for size in sizes(unbroken):
+        for size in sizes(unbroken, setting.sizes):
             f = font(size, path)
             lines = wrap(text, f, avail_w)
-            if extent(lines, int(size * LINE_SPACING)) <= avail_h and (
+            if extent(lines, int(size * setting.line_spacing)) <= avail_h and (
                 not unbroken or len(lines) == hard_lines(text)
             ):
                 return lines, f
 
     # Overflow: estimate how much text fits at the smallest size and trim to it.
-    size = FONT_SIZES[-1]
+    size = setting.sizes[-1]
     f = font(size, path)
-    max_lines = max(1, avail_h // int(size * LINE_SPACING))
+    max_lines = max(1, avail_h // int(size * setting.line_spacing))
     lines = wrap(text, f, avail_w)
     kept = len(" ".join(lines[:max_lines]))
     trimmed = trim_to_sentence(text, kept)
@@ -341,25 +365,27 @@ def wrap_vertical(text: str, f: ImageFont.FreeTypeFont, per_column: int) -> list
     return columns
 
 
-def layout_vertical(text: str) -> tuple[list[str], ImageFont.FreeTypeFont]:
+def layout_vertical(
+    text: str, setting: Setting = NORMAL
+) -> tuple[list[str], ImageFont.FreeTypeFont]:
     # As layout(), but fitting columns across the panel instead of lines down it.
     avail_w = EPD_WIDTH - 2 * MARGIN_X
     avail_h = EPD_HEIGHT - 2 * MARGIN_Y
 
     for unbroken in unbroken_passes(text):
-        for size in sizes(unbroken):
+        for size in sizes(unbroken, setting.sizes):
             f = font(size)
             per_column = max(1, avail_h // size)
             columns = wrap_vertical(text, f, per_column)
-            if extent(columns, int(size * COLUMN_SPACING)) <= avail_w and (
+            if extent(columns, int(size * setting.column_spacing)) <= avail_w and (
                 not unbroken or len(columns) == hard_lines(text)
             ):
                 return columns, f
 
-    size = FONT_SIZES[-1]
+    size = setting.sizes[-1]
     f = font(size)
     per_column = max(1, avail_h // size)
-    max_columns = max(1, avail_w // int(size * COLUMN_SPACING))
+    max_columns = max(1, avail_w // int(size * setting.column_spacing))
     columns = wrap_vertical(text, f, per_column)
     kept = len("".join(columns[:max_columns]))
     trimmed = trim_to_sentence(text, kept)
@@ -423,16 +449,19 @@ def column_cells(column: str, f: ImageFont.FreeTypeFont) -> list[tuple[str, int]
 
 
 def render_vertical(
-    text: str, color: tuple[int, int, int], background: tuple[int, int, int] = BACKGROUND
+    text: str,
+    color: tuple[int, int, int],
+    background: tuple[int, int, int] = BACKGROUND,
+    setting: Setting = NORMAL,
 ) -> Image.Image:
     image = Image.new("RGB", (EPD_WIDTH, EPD_HEIGHT), background)
-    columns, f = layout_vertical(text)
+    columns, f = layout_vertical(text, setting)
     if not columns:
         return image
 
     draw = ImageDraw.Draw(image)
     cell = int(f.size)
-    col_w = int(f.size * COLUMN_SPACING)
+    col_w = int(f.size * setting.column_spacing)
 
     # Columns are a block centred horizontally; within it they run right to left.
     block_w = extent(columns, col_w)
@@ -501,19 +530,21 @@ def render_text(
     text: str,
     color: tuple[int, int, int] = TEXT_COLOR,
     background: tuple[int, int, int] = BACKGROUND,
+    dense: bool = False,
 ) -> Image.Image:
     # Bare text, centred on a blank panel: Japanese vertical, latin horizontal.
     # No header, rule or footer. Both colours should be from the panel's six, or
-    # they come out dithered.
+    # they come out dithered. dense sets it below the usual floor (the prayer).
+    setting = DENSE if dense else NORMAL
     if not text.strip():
         return Image.new("RGB", (EPD_WIDTH, EPD_HEIGHT), background)
     if is_vertical(text):
-        return render_vertical(text, color, background)
+        return render_vertical(text, color, background, setting)
 
     image = Image.new("RGB", (EPD_WIDTH, EPD_HEIGHT), background)
-    lines, f = layout(text, LATIN_FONT_PATH)
+    lines, f = layout(text, LATIN_FONT_PATH, setting)
     draw = ImageDraw.Draw(image)
-    line_h = int(f.size * LINE_SPACING)
+    line_h = int(f.size * setting.line_spacing)
     y = (EPD_HEIGHT - extent(lines, line_h)) // 2
 
     for line in lines:
@@ -576,12 +607,13 @@ class Display:
         text: str,
         color: tuple[int, int, int] = TEXT_COLOR,
         background: tuple[int, int, int] = BACKGROUND,
+        dense: bool = False,
     ) -> None:
         # Render and push one screen. Blocks for the full refresh, by design:
         # nothing should be recorded while the words are still appearing.
-        image = render_text(text, color, background)
+        image = render_text(text, color, background, dense)
         if self.mock:
-            self._show_mock(image, text)
+            self._show_mock(image, text, dense)
             return
         started = time.monotonic()
         self.epd.init()
@@ -621,10 +653,11 @@ class Display:
         except Exception:
             pass
 
-    def _show_mock(self, image: Image.Image, text: str) -> None:
+    def _show_mock(self, image: Image.Image, text: str, dense: bool = False) -> None:
         image.save("screen.png")
+        setting = DENSE if dense else NORMAL
         if is_vertical(text):
-            columns, f = layout_vertical(text)
+            columns, f = layout_vertical(text, setting)
             # Printed as it is set: the first column on the right.
             grid = [list(c) for c in columns]
             depth = max((len(c) for c in grid), default=0)
@@ -635,7 +668,7 @@ class Display:
                 )
                 print(f"  {line}")
             return
-        lines, f = layout(text, LATIN_FONT_PATH)
+        lines, f = layout(text, LATIN_FONT_PATH, setting)
         width = max((len(l) for l in lines), default=0)
         print(f"  [screen.png — {int(f.size)}px, {len(lines)} lines]")
         print("  +" + "-" * (width + 2) + "+")

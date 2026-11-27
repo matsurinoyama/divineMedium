@@ -200,16 +200,42 @@ def reverse_reverb(audio: np.ndarray) -> np.ndarray:
     return result
 
 
+# Every echo is brought to this peak, whatever the clone's own level: a seeker
+# recorded softly makes a soft clone, whose echoes were ~12 dB under the test voice
+# (speaker_test.py) the speakers were set by — and under the cave's peaks.
+ECHO_PEAK = float(os.getenv("ECHO_PEAK", "0.3"))
+MAX_BOOST = 10.0   # +20 dB at most: a near-silent clip is not blown up into noise
+
+
 def process(pcm: bytes, volume: float = 0.65) -> np.ndarray:
     # Raw PCM → the echo as it is heard: pitched down, reverberated, swelled in.
     audio = np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768.0
     audio = add_reverb(pitch_shift(audio), scaled(800), 0.38, 5)
-    return reverse_reverb(audio * volume)
+    audio = reverse_reverb(audio * volume)
+    peak = float(np.max(np.abs(audio))) if len(audio) else 0.0
+    if peak > 0:
+        audio *= min(ECHO_PEAK / peak, MAX_BOOST)
+    return audio
 
 
 # ── Playback (tuhanKami's SpeakerPlayer / BackgroundEchoPlayer) ──────────────
 
 CLEAR = "clear"   # queue sentinel: drop every layer (None dims them)
+
+# PortAudio lists the devices once, when it starts, so a speaker plugged in (or
+# woken) after the server started is invisible to it until it starts again. It
+# can only be restarted while no stream is open — this keeps count.
+_portaudio = threading.Lock()
+_open_streams = 0
+
+
+def _rescan_devices() -> bool:
+    with _portaudio:
+        if _open_streams:
+            return False
+        sd._terminate()
+        sd._initialize()
+        return True
 
 
 class SpeakerPlayer:
@@ -262,62 +288,91 @@ class SpeakerPlayer:
             cave.close()
 
     def loop(self) -> None:
-        # A device can refuse to open (a USB adapter waking up, two opened at once)
-        # or drop out mid-session: keep trying, so one speaker is not lost for good.
+        # A device can refuse to open (a USB adapter waking up, two opened at once),
+        # be missing (unplugged), or drop out mid-session: keep trying, so one
+        # speaker is not lost for good. Each new kind of error is said once.
+        last_error = None
+        stuck = False   # missing, and PortAudio cannot be restarted to look again
         while not self.stop_event.is_set():
             try:
                 self.play()
+                last_error, stuck = None, False
             except Exception as e:
-                note(f"speaker {self.device!r} error — retrying: {type(e).__name__}: {e}")
-                self.stop_event.wait(1.0)
+                error = f"{type(e).__name__}: {e}"
+                if error != last_error:
+                    note(f"speaker {self.device!r} error — retrying: {error}")
+                last_error = error
+                if "No output device matching" not in str(e):
+                    self.stop_event.wait(1.0)
+                    continue
+                # Not there: look again every few seconds, by restarting PortAudio —
+                # unless another speaker is playing, which a restart would cut off.
+                if self.stop_event.wait(3.0):
+                    break
+                if not _rescan_devices() and not stuck:
+                    note(f"speaker {self.device!r} not found while the others play — "
+                         "plug it in, then restart the server")
+                    stuck = True
 
     def play(self) -> None:
-        with sd.OutputStream(samplerate=SAMPLE_RATE, device=self.device,
-                             channels=self.num_channels, dtype="float32") as stream:
-            note(f"speaker {self.device!r} open ({self.num_channels} ch)")
-            opened = time.monotonic()
-            while not self.stop_event.is_set():
-                frame = np.zeros((self.CHUNK, self.num_channels), dtype="float32")
-                # The cave, fading in whenever the stream (re)opens rather than clicking on
-                cave_gain = min(1.0, (time.monotonic() - opened) / CAVE_FADE_IN_SECS)
-                beneath = np.zeros((self.CHUNK, self.num_channels), dtype="float32")
-                for cave, chs in self.caves:
-                    sound = cave.read(self.CHUNK)
-                    if sound is not None:
-                        for c in chs:
-                            beneath[:, c] += sound * cave_gain
-                for ch in range(self.num_channels):
-                    try:
-                        while True:
-                            item = self.pending[ch].get_nowait()
-                            if item is None:
-                                for layer in self.layers[ch]:
-                                    layer["vol"] *= 0.4
-                                self.layers[ch] = [l for l in self.layers[ch]
-                                                   if l["vol"] >= self.VOL_THRESHOLD]
-                            elif isinstance(item, str):   # CLEAR
-                                self.layers[ch] = []
-                            else:
-                                self.layers[ch].append({"audio": item, "pos": 0, "vol": 1.0})
-                                self.layers[ch] = self.layers[ch][-self.MAX_LAYERS:]
-                    except queue.Empty:
-                        pass
-                    mixed = np.zeros(self.CHUNK, dtype="float32")
-                    for layer in self.layers[ch]:
-                        pos = layer["pos"]
-                        end = min(pos + self.CHUNK, len(layer["audio"]))
-                        chunk = layer["audio"][pos:end]
-                        if len(chunk) < self.CHUNK:
-                            chunk = np.pad(chunk, (0, self.CHUNK - len(chunk)))
-                        mixed += chunk * layer["vol"]
-                        layer["pos"] = end if end < len(layer["audio"]) else 0
-                    mixed *= self.master[0]
-                    mixed += beneath[:, ch]   # the echo is played over the cave
-                    peak = float(np.max(np.abs(mixed)))
-                    if peak > 1.0:
-                        mixed /= peak
-                    frame[:, ch] = mixed
-                stream.write(frame)
+        global _open_streams
+        with _portaudio:
+            stream = sd.OutputStream(samplerate=SAMPLE_RATE, device=self.device,
+                                     channels=self.num_channels, dtype="float32")
+            _open_streams += 1
+        try:
+            with stream:
+                self._play(stream)
+        finally:
+            stream.close()   # also when start() failed, which skips the with's exit
+            with _portaudio:
+                _open_streams -= 1
+
+    def _play(self, stream: sd.OutputStream) -> None:
+        note(f"speaker {self.device!r} open ({self.num_channels} ch)")
+        opened = time.monotonic()
+        while not self.stop_event.is_set():
+            frame = np.zeros((self.CHUNK, self.num_channels), dtype="float32")
+            # The cave, fading in whenever the stream (re)opens rather than clicking on
+            cave_gain = min(1.0, (time.monotonic() - opened) / CAVE_FADE_IN_SECS)
+            beneath = np.zeros((self.CHUNK, self.num_channels), dtype="float32")
+            for cave, chs in self.caves:
+                sound = cave.read(self.CHUNK)
+                if sound is not None:
+                    for c in chs:
+                        beneath[:, c] += sound * cave_gain
+            for ch in range(self.num_channels):
+                try:
+                    while True:
+                        item = self.pending[ch].get_nowait()
+                        if item is None:
+                            for layer in self.layers[ch]:
+                                layer["vol"] *= 0.4
+                            self.layers[ch] = [l for l in self.layers[ch]
+                                               if l["vol"] >= self.VOL_THRESHOLD]
+                        elif isinstance(item, str):   # CLEAR
+                            self.layers[ch] = []
+                        else:
+                            self.layers[ch].append({"audio": item, "pos": 0, "vol": 1.0})
+                            self.layers[ch] = self.layers[ch][-self.MAX_LAYERS:]
+                except queue.Empty:
+                    pass
+                mixed = np.zeros(self.CHUNK, dtype="float32")
+                for layer in self.layers[ch]:
+                    pos = layer["pos"]
+                    end = min(pos + self.CHUNK, len(layer["audio"]))
+                    chunk = layer["audio"][pos:end]
+                    if len(chunk) < self.CHUNK:
+                        chunk = np.pad(chunk, (0, self.CHUNK - len(chunk)))
+                    mixed += chunk * layer["vol"]
+                    layer["pos"] = end if end < len(layer["audio"]) else 0
+                mixed *= self.master[0]
+                mixed += beneath[:, ch]   # the echo is played over the cave
+                peak = float(np.max(np.abs(mixed)))
+                if peak > 1.0:
+                    mixed /= peak
+                frame[:, ch] = mixed
+            stream.write(frame)
 
 
 class EchoPlayer:

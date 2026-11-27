@@ -259,6 +259,7 @@ ECHO_OUTPUTS=5:0:4,5:1:4,5:2:4,5:3:4   # device:channel:channels — one 4-chann
 # ECHO_OUTPUTS=6:0:2,6:1:2,4:0+1:2   # 0+1: one speaker on both sides of a device (same echo on L and R)
 # ECHO_PORT=8765
 # ECHO_MODEL=claude-haiku-5-5
+# ECHO_PEAK=0.3                    # every echo is brought to this level, however loud the clone
 # CAVE_VOLUME=1.0                  # the cave beneath the echoes: 1.0 as recorded, 0 for none
 # CAVE_FILE=/path/to/other.mp3     # default: ../CAVESOUNDS.mp3
 ```

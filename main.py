@@ -32,6 +32,7 @@ import listen
 import plugs
 import voice
 from audio import (
+    NO_BED,
     PLAYBACK_RATE,
     PRAYER_SAMPLE_RATE,
     choose_bell,
@@ -161,7 +162,7 @@ def utter(
     *stops: threading.Event,
     style: Style = (TEXT_COLOR, BACKGROUND),
     after: Panel | None = None,
-    bed: np.ndarray | None = None,
+    bed: np.ndarray = NO_BED,
     voice_offset_secs: float = 0.0,
     reverb: bool = True,
 ) -> None:

@@ -167,6 +167,17 @@ class SpeechGate:
         self.silence = 0 if rms > self.threshold else self.silence + 1
         return self.silence >= int(VAD_SILENCE_SECS / 0.05)
 
+    def hear(self, chunk: np.ndarray) -> tuple[str, list[np.ndarray]]:
+        # What this chunk was ("learning", "silent", "began", "speaking" or
+        # "ended"), and the chunks it gives to keep.
+        rms = float(np.sqrt(np.mean(chunk ** 2)))
+        if self.learning(rms):
+            return "learning", []
+        if not self.speaking:
+            kept = self.opens(chunk, rms)
+            return ("began", kept) if kept else ("silent", [])
+        return ("ended" if self.closes(rms) else "speaking"), [chunk]
+
 
 def _next_chunk(q: queue.Queue) -> np.ndarray | None:
     try:
@@ -214,20 +225,14 @@ def receive_question(
             chunk = _next_chunk(q)
             if chunk is None:
                 continue
-            rms = float(np.sqrt(np.mean(chunk ** 2)))
-            if gate.learning(rms):
-                continue
-            if not gate.speaking:
-                kept = gate.opens(chunk, rms)
-                if kept:
-                    print("  [The seeker speaks...]")
-                    on_start()
-                    take(kept)
-                continue
-            take([chunk])
-            if gate.closes(rms):
+            event, kept = gate.hear(chunk)
+            if event == "began":
+                print("  [The seeker speaks...]")
+                on_start()
+            take(kept)
+            if event == "ended":
                 break
-            if cut_in is not None and cut_in():
+            if event == "speaking" and cut_in is not None and cut_in():
                 print("  [The Entity does not wait for the rest.]")
                 break
         else:
@@ -408,14 +413,27 @@ class VoiceFlow:
         return taken
 
 
+NO_BED = np.zeros(0, dtype="float32")
+
+
 def _stopped(stops: tuple[threading.Event, ...]) -> bool:
     return any(e.is_set() for e in stops)
+
+
+def _frame(bed: np.ndarray, at: int, n: int, voice: np.ndarray | None) -> np.ndarray:
+    # n samples from at: the bed, and over it, the voice if it is due.
+    frame = np.zeros(n, dtype="float32")
+    part = bed[at: at + n]
+    frame[:len(part)] += part
+    if voice is not None:
+        frame[:len(voice)] += voice
+    return np.clip(frame, -1.0, 1.0).reshape(-1, 1)
 
 
 def play_stream(
     speech: Iterator[bytes] | None,
     *stops: threading.Event,
-    bed: np.ndarray | None = None,
+    bed: np.ndarray = NO_BED,
     voice_offset_secs: float = 0.0,
     reverb: bool = True,
 ) -> None:
@@ -427,7 +445,6 @@ def play_stream(
     """
     chunk = int(PLAYBACK_RATE * 0.05)
     flow = VoiceFlow(speech, stops, reverb)
-    bed = bed if bed is not None else np.zeros(0, dtype="float32")
     offset = int(voice_offset_secs * PLAYBACK_RATE)
     written = 0
     try:
@@ -443,13 +460,7 @@ def play_stream(
                     # Nothing else sounds: wait for the voice rather than sound silence
                     flow.gather(block=True)
                     continue
-                frame = np.zeros(chunk, dtype="float32")
-                part = bed[written: written + chunk]
-                frame[:len(part)] += part
-                if voice_due:
-                    taken = flow.take(chunk)
-                    frame[:len(taken)] += taken
-                stream.write(np.clip(frame, -1.0, 1.0).reshape(-1, 1))
+                stream.write(_frame(bed, written, chunk, flow.take(chunk) if voice_due else None))
                 written += chunk
     except Exception as e:
         print(f"  [the speaker is silent: {e}]")

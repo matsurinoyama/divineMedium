@@ -325,47 +325,52 @@ class SpeakerPlayer:
         note(f"speaker {self.device!r} awake ({self.num_channels} ch)")
         opened = time.monotonic()
         while not self.stop_event.is_set():
-            frame = np.zeros((self.CHUNK, self.num_channels), dtype="float32")
             # The cave fades in whenever the speaker wakes, rather than striking on
-            cave_gain = min(1.0, (time.monotonic() - opened) / CAVE_FADE_IN_SECS)
-            beneath = np.zeros((self.CHUNK, self.num_channels), dtype="float32")
-            for cave, chs in self.caves:
-                sound = cave.read(self.CHUNK)
-                if sound is not None:
-                    for c in chs:
-                        beneath[:, c] += sound * cave_gain
+            beneath = self.cave(min(1.0, (time.monotonic() - opened) / CAVE_FADE_IN_SECS))
+            frame = np.zeros((self.CHUNK, self.num_channels), dtype="float32")
             for ch in range(self.num_channels):
-                try:
-                    while True:
-                        item = self.pending[ch].get_nowait()
-                        if item is None:
-                            for layer in self.layers[ch]:
-                                layer["vol"] *= 0.4
-                            self.layers[ch] = [l for l in self.layers[ch]
-                                               if l["vol"] >= self.VOL_THRESHOLD]
-                        elif isinstance(item, str):   # CLEAR
-                            self.layers[ch] = []
-                        else:
-                            self.layers[ch].append({"audio": item, "pos": 0, "vol": 1.0})
-                            self.layers[ch] = self.layers[ch][-self.MAX_LAYERS:]
-                except queue.Empty:
-                    pass
-                mixed = np.zeros(self.CHUNK, dtype="float32")
-                for layer in self.layers[ch]:
-                    pos = layer["pos"]
-                    end = min(pos + self.CHUNK, len(layer["audio"]))
-                    chunk = layer["audio"][pos:end]
-                    if len(chunk) < self.CHUNK:
-                        chunk = np.pad(chunk, (0, self.CHUNK - len(chunk)))
-                    mixed += chunk * layer["vol"]
-                    layer["pos"] = end if end < len(layer["audio"]) else 0
-                mixed *= self.master[0]
-                mixed += beneath[:, ch]   # the echo sounds over the cave
+                self.receive(ch)
+                mixed = self.mix(ch) * self.master[0] + beneath[:, ch]   # the echo over the cave
                 peak = float(np.max(np.abs(mixed)))
-                if peak > 1.0:
-                    mixed /= peak
-                frame[:, ch] = mixed
+                frame[:, ch] = mixed / peak if peak > 1.0 else mixed
             stream.write(frame)
+
+    def cave(self, gain: float) -> np.ndarray:
+        # The next breath of every speaker's cave on this device.
+        beneath = np.zeros((self.CHUNK, self.num_channels), dtype="float32")
+        for cave, chs in self.caves:
+            sound = cave.read(self.CHUNK)
+            if sound is not None:
+                for c in chs:
+                    beneath[:, c] += sound * gain
+        return beneath
+
+    def receive(self, ch: int) -> None:
+        # What has come for this speaker: a new echo, a dimming (None), or CLEAR.
+        while True:
+            try:
+                item = self.pending[ch].get_nowait()
+            except queue.Empty:
+                return
+            if item is None:
+                for layer in self.layers[ch]:
+                    layer["vol"] *= 0.4
+                self.layers[ch] = [l for l in self.layers[ch] if l["vol"] >= self.VOL_THRESHOLD]
+            elif isinstance(item, str):
+                self.layers[ch] = []
+            else:
+                self.layers[ch] = (self.layers[ch] + [{"audio": item, "pos": 0, "vol": 1.0}])[-self.MAX_LAYERS:]
+
+    def mix(self, ch: int) -> np.ndarray:
+        # The next breath of every echo on this speaker, each looping until dimmed away.
+        mixed = np.zeros(self.CHUNK, dtype="float32")
+        for layer in self.layers[ch]:
+            pos = layer["pos"]
+            end = min(pos + self.CHUNK, len(layer["audio"]))
+            chunk = layer["audio"][pos:end]
+            mixed[:len(chunk)] += chunk * layer["vol"]
+            layer["pos"] = end if end < len(layer["audio"]) else 0
+        return mixed
 
 
 class EchoPlayer:

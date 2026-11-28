@@ -306,16 +306,16 @@ def wrap_vertical(text: str, f: ImageFont.FreeTypeFont, per_column: int) -> list
     cur = ""
     used = 0
     for tok, cells in vertical_tokens(text, f):
-        hang = 1 if tok in NO_LINE_START else 0
+        hang = int(tok in NO_LINE_START)
         if tok == "\n":
             _close_column(columns, cur)
             cur, used = "", 0
         elif tok == " ":
-            if _takes_space(cur):
-                cur += " "
-                used += 1
-        elif not cur and columns and hang:
-            columns[-1] += tok
+            spaced = _takes_space(cur)
+            cur += " " * spaced
+            used += spaced
+        elif hang and not cur and columns:
+            columns[-1] += tok   # drawn back up to the column above
         elif cur and used + cells > per_column + hang:
             columns.append(cur)
             cur, used = tok, cells

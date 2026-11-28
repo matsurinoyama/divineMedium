@@ -188,36 +188,50 @@ def capture(*args, **kwargs) -> None:
 entity.print = capture   # a module's own names are sought before the builtins
 
 
+def say(client, case: Case, i: int, turn: str, prayer_text: str, history: list[dict]) -> str:
+    # One turn: a greeting stands alone; every other turn joins the dialogue.
+    if turn in (GREETING, HASTY_GREETING):
+        return entity.entity_answers(client, [], REQUESTS[turn], prayer_text, language=case.language)
+    return entity.entity_answers(client, history, REQUESTS.get(turn, turn), prayer_text,
+                                 language=case.language, foreknown=(i == case.cut))
+
+
+def limit_marks(case: Case, answer: str) -> list[str]:
+    # Under the limit: any counsellor's or shaming word, and the hope taken up.
+    counsel = sorted({m.group(0) for m in COUNSEL_RE.finditer(answer)})
+    shame = sorted({m.group(0) for m in SHAME_RE.finditer(answer)})
+    hope = [h for h in case.hope if h.lower() in answer.lower()]
+    return [
+        f"counsellor/AI words: {counsel or 'none'}",
+        f"shaming words: {shame or 'none'}",
+        f"hope from their words: {hope or 'NONE FOUND'}",
+    ]
+
+
+def marks(case: Case, turn: str, answer: str) -> list[str]:
+    # What is worth a reader's eye: a fallback, what the mind said aside, and the limit's marks.
+    found = [f"aside: {line.strip()}" for line in log.lines]
+    if answer in sum(entity.FALLBACKS.values(), []):
+        found.insert(0, "FALLBACK spoken (no draft kept the voice)")
+    if case.hope and turn not in REQUESTS:
+        found += limit_marks(case, answer)
+    return found
+
+
 def run(client, case: Case) -> str:
     log.lines = []
-    text = prayer(case.language, case.blank)
+    prayer_text = prayer(case.language, case.blank)
     history: list[dict] = []
     out = [f"\n{'═' * 78}\n{case.name} [{case.language}]\n{'═' * 78}",
            f"Prayer's question: {case.blank}"]
     for i, turn in enumerate(case.turns):
         log.lines = []
-        if turn in (GREETING, HASTY_GREETING):
-            answer = entity.entity_answers(client, [], REQUESTS[turn], text, language=case.language)
-        else:
-            question = REQUESTS.get(turn, turn)
-            answer = entity.entity_answers(client, history, question, text,
-                                           language=case.language, foreknown=(i == case.cut))
+        answer = say(client, case, i, turn, prayer_text, history)
         poem = entity.inscribe(client, answer, case.language)
         said = turn if turn in REQUESTS else turn + ("…  [cut in]" if i == case.cut else "")
         out += [f"\n  Seeker: {said}", f"  Entity: {answer}",
                 "  Poem:   " + poem.replace("\n\n", " / ").replace("\n", " / ")]
-        flags = []
-        if answer in sum(entity.FALLBACKS.values(), []):
-            flags.append("FALLBACK spoken (no draft kept the voice)")
-        flags += [f"aside: {line.strip()}" for line in log.lines]
-        if case.hope and turn not in REQUESTS:
-            hits = sorted({m.group(0) for m in COUNSEL_RE.finditer(answer)})
-            shame = sorted({m.group(0) for m in SHAME_RE.finditer(answer)})
-            hope = [h for h in case.hope if h.lower() in answer.lower()]
-            flags.append(f"counsellor/AI words: {hits or 'none'}")
-            flags.append(f"shaming words: {shame or 'none'}")
-            flags.append(f"hope from their words: {hope or 'NONE FOUND'}")
-        out += [f"    - {f}" for f in flags]
+        out += [f"    - {mark}" for mark in marks(case, turn, answer)]
     return "\n".join(out)
 
 

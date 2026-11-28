@@ -131,4 +131,8 @@ Text is fitted, never paged: the largest size at which it stands whole on one sc
 
 ## Credits and AI disclosure
 
+Bell audio provided by OtoLogic ([梵鐘04](https://otologic.jp/free/se/temple-bells01.html))
+
+Cave audio provided by Asleep In Perfection ([CAVE SOUNDS for DEEP SLEEP ⛰ INSIDE the CAVE Ambience/ASMR + WATER DRIPPING](https://youtu.be/1nS7vjVUjBg))
+
 The code and documentation were written with Anthropic's [Claude](https://claude.ai/). The work requires [Claude](https://platform.claude.com) and [ElevenLabs](https://elevenlabs.io). Every recording and voice clone is deleted at the end of each ritual.

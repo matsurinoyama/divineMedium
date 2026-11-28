@@ -61,15 +61,12 @@ PRAYER_UPLOAD_WAV = "prayer_upload.wav"  # prayer downsampled for the voice clon
 # off once they have said enough — a number of words (or, in Japanese,
 # characters) drawn afresh each time, so the moment cannot be learned.
 FOREKNOW_CHANCE = 0.35
-# How each answer is given (see llm.MODES): mostly plain revelation; now and then
-# an oracle's riddle that leaves them guessing, or a concrete command. Weights.
-ANSWER_MODES = {"revelation": 0.5, "riddle": 0.25, "command": 0.25}
 FOREKNOW_AT = {False: (7, 14), True: (16, 30)}   # by CHARACTER_COUNTED
 
 # The god takes its time. However quickly the clone is made (a few seconds on a
 # fast network), the greeting's bell never tolls sooner than this after the prayer
 # ends: the fans keep blowing, the panel says it is drawing near, and it arrives —
-# unless the seeker double-presses to hurry it, and it comes at once, angered.
+# unless the seeker double-presses to hurry it, and it comes at once, moved by their haste.
 ARRIVAL_SECS = 60.0
 
 
@@ -338,7 +335,7 @@ def run_ritual(
                 session.abort.wait(0.1)
                 check(session)
         if session.hasten.is_set():
-            # Hurried: the greeting it had ready is replaced by an angry one
+            # Hurried: the greeting it had ready is replaced by an urgent one
             greeting = ask_entity(entity, [], GREETING_REQUEST + IMPATIENCE, prayer_text,
                                   language=prayer_lang)
             check(session)
@@ -404,7 +401,6 @@ def run_ritual(
             print(f"  You: {question}{'…  [cut in]' if cut else ''}")
             print("  [They speak...]")
             answer = ask_entity(entity, history, question, prayer_text, language=language,
-                                mode=random.choices(*zip(*ANSWER_MODES.items()))[0],
                                 foreknown=cut)
             check(session)
             print(f"\n  They: {answer}\n")
@@ -534,7 +530,7 @@ def watch(session: Session, ritual_thread: threading.Thread) -> None:
                 print("\n  [Ending — the entity will say its farewell.]\n")
                 session.end.set()
             elif session.stage == ARRIVAL and not session.hasten.is_set():
-                print("\n  [The seeker would not wait — the entity comes now, angered.]\n")
+                print("\n  [The seeker would not wait — the entity comes now, in haste.]\n")
                 session.hasten.set()
         elif key == "o" and session.stage == PRAYER:
             print("\n  [The prayer ends with a double press ('e').]\n")

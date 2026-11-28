@@ -33,7 +33,7 @@ class Session:
         self.tap = threading.Event()     # 'e' during the prayer (a double press) — ends it
         self.end = threading.Event()     # 'e' — end the session, ask for a farewell
         self.abort = threading.Event()   # 'i'/'p' — drop everything, back to idle
-        self.hasten = threading.Event()  # 'e' while waiting for the god — it comes early, angered
+        self.hasten = threading.Event()  # 'e' while waiting for the god — it comes early, in haste
 
     def reset(self) -> None:
         for event in (self.tap, self.end, self.abort, self.hasten):

@@ -1,19 +1,22 @@
 #!/usr/bin/env python3
 """
-Render text to the panel, or to screen.png, without running a ritual.
+Words written to the panel, or to screen.png, with no ritual held.
 
-  python debug_display.py                     # a sample english answer
-  python debug_display.py --ja                # a sample japanese answer
-  python debug_display.py "your text here"    # anything you like
-  python debug_display.py --budget            # check BUDGET_* against the geometry
-  python debug_display.py --real "text"       # push it to the actual panel
+  python tests/panel_test.py                     # an answer in English
+  python tests/panel_test.py --ja                # an answer in Japanese
+  python tests/panel_test.py "your words here"
+  python tests/panel_test.py --budget            # BUDGET_* weighed against the panel
+  python tests/panel_test.py --real "words"      # to the panel itself
 
-Without --real it always writes screen.png, so layout can be tuned on a laptop.
+Without --real, always to screen.png, so the writing can be tuned off the Pi.
 """
 
 from __future__ import annotations
 
+import os
 import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import display
 from display import (
@@ -37,15 +40,14 @@ SAMPLE_JA = (
 )
 
 
-# Filler of a given average word length, for measuring capacity rather than taste.
-# ORNATE is the realistic ceiling for this prompt's register — long words, but
-# still carrying the short function words that any English sentence must have.
+# Filler, to measure how much the panel holds rather than how it reads. ORNATE is
+# the longest the Entity's words truly run, short words still among the long.
 ORDINARY = "have I not placed the work in your hands turn and walk the way you refused"
 ORNATE = (
     "the abundant blessing I promised is already yours and the troubles that "
     "trouble you have been forgiven since the beginning"
 )
-# No real sentence looks like this; it is here to prove the trim backstop fires.
+# No true sentence is like this; it is here to prove the cutting back works.
 PATHOLOGICAL = "intercession unconditionally transfiguration remembrance"
 
 
@@ -56,11 +58,9 @@ def fill(source: str, words: int) -> str:
 
 def budget_report() -> None:
     """
-    Check the budgets against the real font metrics.
-
-    A budget is sound when prose at that length still fits without being trimmed.
-    Landing on the floor size is acceptable; being TRIMMED is not — lower the
-    budget in display.py until it is not.
+    The budgets, weighed against the font itself. A budget is sound when words of
+    that length stand without being cut: the floor size may be reached; TRIMMED
+    may not, and then the budget in display.py must be lowered.
     """
     print(f"  panel {display.EPD_WIDTH}x{display.EPD_HEIGHT}, sizes {FONT_SIZES}")
     cases = [
@@ -70,7 +70,7 @@ def budget_report() -> None:
         ("worst case", fill(PATHOLOGICAL, BUDGET_WORDS), f"{BUDGET_WORDS} words", False),
     ]
     for name, text, label, must_fit in cases:
-        # Japanese is measured through the vertical path, which is how it is set.
+        # Japanese is weighed in columns, as it is written.
         vertical = display.is_vertical(text)
         pieces, font = (layout_vertical if vertical else layout)(text)
         joined = ("" if vertical else " ").join(pieces)

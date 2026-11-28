@@ -1,57 +1,53 @@
-from __future__ import annotations
+"""
+The panel on which the Entity writes, in a brush hand: Japanese in columns, as an
+oracle is written, latin across. It is slow — every screen a full repaint of some
+twenty seconds — so it bears one utterance at a time and never anything else.
+"""
 
-from dataclasses import dataclass
+from __future__ import annotations
 
 import os
 import re
 import sys
 import time
 import types
+from dataclasses import dataclass
 
 from PIL import Image, ImageDraw, ImageFont
 
-# The waveshare driver lives in lib/ next to this file, as in the vendor examples.
-LIBDIR = os.path.join(os.path.dirname(os.path.realpath(__file__)), "lib")
+HERE = os.path.dirname(os.path.realpath(__file__))
+# The panel's own driver dwells in lib/.
+LIBDIR = os.path.join(HERE, "lib")
 if os.path.exists(LIBDIR):
     sys.path.append(LIBDIR)
 
-# ── Panel ─────────────────────────────────────────────────────────────────────
-# The 4inch (E) is 400x600 portrait and has no partial refresh — every update is a
-# full ~15-20 second repaint, so the ritual shows one screen per utterance and
-# never paints progress or status.
+# ── The panel ─────────────────────────────────────────────────────────────────
+# Waveshare 4inch (E): 400x600, upright, and no partial refresh.
 EPD_WIDTH = 400
 EPD_HEIGHT = 600
 
-# The six colours the panel can actually produce. These must be the exact RGB
-# values in the driver's palette: getbuffer() quantises with Floyd-Steinberg
-# dithering, and only exact matches come through as flat colour instead of noise.
+# The colours the panel can truly lay down, as the driver's palette names them:
+# any other is dithered into noise.
 BLACK = (0, 0, 0)
 WHITE = (255, 255, 255)
 YELLOW = (255, 255, 0)
 RED = (255, 0, 0)
 BLUE = (0, 0, 255)
-GREEN = (0, 255, 0)
 
 TEXT_COLOR = BLACK
 BACKGROUND = WHITE
-
-# The panel has no gold; yellow is the nearest colour it can lay down flat.
-GOLD = YELLOW
+GOLD = YELLOW   # the panel knows no gold; yellow is the nearest it lays down flat
 
 MARGIN_X = 30
 MARGIN_Y = 40
 LINE_SPACING = 1.38     # multiple of font size, between horizontal lines
 COLUMN_SPACING = 1.5    # multiple of font size, between vertical columns
-# A blank line in the text ("\n\n") is a paragraph break: this fraction of a line
-# (or of a column, set vertically) of extra space instead of a whole empty one.
+# A blank line ("\n\n") parts two stanzas by half a line, not a whole one.
 PARAGRAPH_GAP = 0.5
 
-# Largest first — layout() walks down this ladder and keeps the biggest size whose
-# text still fits on one screen. The floor is deliberately high: ShinGyoRei is a
-# brush face with thin, broken strokes, and below ~28px those strokes start
-# dropping out of a 1-bit-per-colour panel altogether.
+# Largest first: the largest at which the words still fit is the one chosen.
+# Below 28px the brush's thin strokes begin to fall out of the panel.
 FONT_SIZES = [46, 40, 35, 31, 28]
-
 
 
 @dataclass(frozen=True)
@@ -62,70 +58,46 @@ class Setting:
 
 
 NORMAL = Setting(FONT_SIZES, LINE_SPACING, COLUMN_SPACING)
-# The prayer alone is set small and close: a minute of text to read aloud cannot
-# fit one screen at 28px (about 140 characters set vertically, 320 across). Below
-# about 20px the brush strokes begin to break up, so the ladder stops at 18.
-# Only screens shown with dense=True use it; answers never do.
+# The prayer alone is set small and close: a minute of reading cannot stand on
+# one screen at 28px. Only screens shown with dense=True; never the Entity's words.
 DENSE = Setting([24, 22, 21, 20, 19, 18], line_spacing=1.22, column_spacing=1.2)
 
-# A semi-cursive brush face — the hand of something writing on the panel rather
-# than a machine printing to it.
-FONT_PATH = os.getenv(
-    "FONT_PATH",
-    os.path.join(
-        os.path.dirname(os.path.realpath(__file__)), "fonts", "FOT-ShinGyoReiStdN-R.otf"
-    ),
-)
+# A semi-cursive brush: the hand of something writing, not a machine printing.
+FONT_PATH = os.getenv("FONT_PATH", os.path.join(HERE, "assets", "fonts", "FOT-ShinGyoReiStdN-R.otf"))
+# ShinGyoRei writes latin in its own strange hand (its e is near an epsilon).
+LATIN_FONT_PATH = os.getenv("LATIN_FONT_PATH", FONT_PATH)
 
-# Budgets handed to the entity so its answer fits a single screen without dropping
-# to the smallest font. These are measured against the font and geometry above by
-# `python debug_display.py --budget`; re-run it after changing either.
-#
-# Horizontally the floor is about 320 characters at 28px. 34 words holds even when
-# every one of them is long (~9 characters, counting the space); ordinary prose at
-# that length lands at 35px with room to spare. Vertically the floor is about 140
-# characters, so 95 lands at 31px.
+# How much the Entity may say and still stand on one screen above the floor size,
+# measured on this font and geometry by `python tests/panel_test.py --budget`.
 BUDGET_WORDS = 34       # latin words
 BUDGET_CJK_CHARS = 95   # japanese characters
 
-# ── Orientation ───────────────────────────────────────────────────────────────
-# The panel is mounted upside down, so every frame is turned 180° on its way to
-# the hardware. Layout is still done upright and screen.png stays upright.
-# ROTATE=0 puts it back.
+# The panel hangs upside down; ROTATE=0 sets it upright. screen.png is always upright.
 PANEL_ROTATION = int(os.getenv("ROTATE", "180"))
 
-# Japanese is set vertically (縦書き): columns run top to bottom, and the columns
-# themselves run right to left, which is how a prayer or an oracle would be
-# written. Latin stays horizontal. VERTICAL=always/never overrides the detection.
+# Japanese is written in columns (縦書き), top to bottom, right to left.
+# VERTICAL=always or never overrides what the words themselves decide.
 VERTICAL_MODE = os.getenv("VERTICAL", "auto").lower()
 
-# Kana and kanji — what actually decides that a line is Japanese. Deliberately
-# narrower than CJK_RE, which also matches shared punctuation.
+# Kana and kanji: what makes a line Japanese. CJK_RE also takes shared punctuation.
 JAPANESE_RE = re.compile(r"[぀-ヿ㐀-䶿一-鿿豈-﫿]")
-# CJK ideographs, kana and fullwidth forms: these wrap per character, not per word.
+# Ideographs, kana and fullwidth forms: each may be parted from the next.
 CJK_RE = re.compile(
     r"[　-〿぀-ヿ㐀-䶿一-鿿豈-﫿＀-￯]"
 )
 
-# Characters that must not begin a line or a column (kinsoku shori, abbreviated).
+# What may never open a line or a column (kinsoku).
 NO_LINE_START = "、。，．,.!?!?)）]｝」』》〉…・ー:;:;"
 
-# Set sideways when the text runs vertically: the long-vowel mark, dashes, ellipses
-# and every kind of bracket. Rotated a quarter turn clockwise, as in print.
+# Turned a quarter turn when written in columns, as in print.
 VERTICAL_ROTATE = set("ー〜～−—–‐-—…‥（）()｛｝{}「」『』【】〔〕［］[]〈〉《》＝=：；:;")
-# Set in the upper right of their square instead of on the baseline.
+# Set in the upper right of their square when written in columns.
 VERTICAL_TOP_RIGHT = set("、。，．,.")
-
-# ShinGyoRei carries latin too, but draws it in its own idiosyncratic hand — its
-# "e" is closer to a Greek epsilon. That reads as part of the voice at display
-# sizes; point LATIN_FONT_PATH at another face if it should not.
-LATIN_FONT_PATH = os.getenv("LATIN_FONT_PATH", FONT_PATH)
 
 _font_cache: dict[tuple[int, str], ImageFont.FreeTypeFont] = {}
 
 
 def font(size: int, path: str | None = None) -> ImageFont.FreeTypeFont:
-    # One face for both scripts: ShinGyoRei StdN carries kana, kanji and latin.
     key = (size, path or FONT_PATH)
     if key not in _font_cache:
         try:
@@ -133,14 +105,14 @@ def font(size: int, path: str | None = None) -> ImageFont.FreeTypeFont:
         except OSError as e:
             raise RuntimeError(
                 f"Cannot load the display font at {key[1]} ({e}). Put "
-                "FOT-ShinGyoReiStdN-R.otf in fonts/, or point FONT_PATH at another "
+                "FOT-ShinGyoReiStdN-R.otf in assets/fonts/, or point FONT_PATH at another "
                 "face that covers both kana/kanji and latin."
             ) from e
     return _font_cache[key]
 
 
 def is_vertical(text: str) -> bool:
-    # Vertical when the utterance is substantially Japanese.
+    # In columns, when the words are mostly Japanese.
     if VERTICAL_MODE == "always":
         return True
     if VERTICAL_MODE == "never":
@@ -152,17 +124,12 @@ def is_vertical(text: str) -> bool:
     return japanese >= max(4, len(stripped) * 0.3)
 
 
-# ── Horizontal layout ─────────────────────────────────────────────────────────
+# ── Writing across ────────────────────────────────────────────────────────────
 
 
 def tokens(text: str) -> list[str]:
-    """
-    Split text into the smallest units a line may break between.
-
-    Latin runs stay whole so words are never split; each CJK character is its own
-    token because Japanese has no spaces to break on. " " is a soft break and
-    "\n" a hard one; two in a row leave an empty line, the paragraph break.
-    """
+    # The smallest pieces a line may part between: a latin word whole, each
+    # Japanese character alone. " " may part; "\n" must; two "\n" part stanzas.
     out: list[str] = []
     buf = ""
     for ch in text:
@@ -188,68 +155,68 @@ def tokens(text: str) -> list[str]:
     return out
 
 
+def _hang(tok: str, f: ImageFont.FreeTypeFont, max_width: int) -> float:
+    # Closing punctuation never opens a line: it may hang past the margin instead
+    # (burasage), the overhang shared by both margins.
+    return min(f.size, EPD_WIDTH - 8 - max_width) if tok in NO_LINE_START else 0
+
+
+def _draws_back(lines: list[str], cur: str, tok: str, f: ImageFont.FreeTypeFont, limit: float) -> bool:
+    # Closing punctuation pushed down alone is drawn back up, if the line above can bear it.
+    return not cur and bool(lines) and tok in NO_LINE_START and f.getlength(lines[-1] + tok) <= limit
+
+
+def _overruns(cur: str, tok: str, f: ImageFont.FreeTypeFont, limit: float) -> bool:
+    # Whether tok would carry a line with words in it past its breadth.
+    return bool(cur.strip()) and f.getlength((cur + tok).rstrip()) > limit
+
+
 def wrap(text: str, f: ImageFont.FreeTypeFont, max_width: int) -> list[str]:
-    # Greedy wrap over tokens(). Returns lines already stripped of trailing spaces.
+    # Lines filled one by one until the next piece would overrun the breadth.
     lines: list[str] = []
     cur = ""
     for tok in tokens(text):
+        limit = max_width + _hang(tok, f, max_width)
         if tok == "\n":
             lines.append(cur.rstrip())
             cur = ""
-            continue
-        if tok == " ":
-            if cur:
-                cur += " "
-            continue
-
-        # Japanese never opens a line with closing punctuation. Such a token is
-        # allowed to hang past the right margin instead (burasage) — the text is
-        # centred, so the overhang is split between the two margins.
-        hang = min(f.size, EPD_WIDTH - 8 - max_width) if tok in NO_LINE_START else 0
-
-        # ...and if it has already been pushed onto a line of its own, pull it
-        # back up onto the previous one.
-        if not cur and lines and tok in NO_LINE_START:
-            if f.getlength(lines[-1] + tok) <= max_width + hang:
-                lines[-1] += tok
-                continue
-
-        candidate = cur + tok
-        if f.getlength(candidate.rstrip()) <= max_width + hang or not cur.strip():
-            cur = candidate
-        else:
+        elif tok == " ":
+            cur += " " if cur else ""
+        elif _draws_back(lines, cur, tok, f, limit):
+            lines[-1] += tok
+        elif _overruns(cur, tok, f, limit):
             lines.append(cur.rstrip())
             cur = tok
+        else:
+            cur += tok
     if cur.strip():
         lines.append(cur.rstrip())
     return lines
 
 
 def extent(units: list[str], pitch: int) -> int:
-    # Total depth of laid-out lines (or columns): a full pitch for each, and a
-    # paragraph gap for each empty one.
+    # How deep the lines (or columns) reach: a pitch each, half for a stanza's gap.
     gaps = sum(1 for u in units if not u.strip())
     return int((len(units) - gaps) * pitch + gaps * pitch * PARAGRAPH_GAP)
 
 
 def hard_lines(text: str) -> int:
-    # Lines (or columns) the text asks for itself, blank paragraph breaks included.
+    # The lines the words ask for themselves, the gaps between stanzas included.
     return text.count("\n") + 1
 
 
-# Verse is kept unwrapped only down to this size; below it, a larger size with a
-# wrapped line reads better than small unbroken lines.
+# Verse is kept whole only down to this size; below it, a larger hand with a line
+# parted reads better than small whole lines.
 UNBROKEN_MIN_SIZE = 35
 
 
 def unbroken_passes(text: str) -> tuple[bool, ...]:
-    # Verse is first fitted without wrapping any of its lines; prose never is.
+    # Verse is first fitted with every line whole; prose never is.
     return (True, False) if hard_lines(text) > 1 else (False,)
 
 
 def sizes(unbroken: bool, ladder: list[int]) -> list[int]:
-    # A ladder that lies wholly below UNBROKEN_MIN_SIZE (the dense one) tries its
-    # lines unbroken at every size it has.
+    # A ladder wholly below UNBROKEN_MIN_SIZE (the prayer's) keeps lines whole at every size.
     if not unbroken:
         return ladder
     return [s for s in ladder if s >= UNBROKEN_MIN_SIZE] or ladder
@@ -259,13 +226,9 @@ def layout(
     text: str, path: str | None = None, setting: Setting = NORMAL
 ) -> tuple[list[str], ImageFont.FreeTypeFont]:
     """
-    Pick the largest font size whose wrapped text fits one screen.
-
-    Text with line breaks of its own (verse) is first tried at sizes where none
-    of its lines has to wrap, so a line of a poem is never split in two.
-
-    Returns (lines, font). If even the smallest size overflows, the text is
-    trimmed at a sentence boundary and re-laid out at that size.
+    The largest hand in which the words fit one screen, and the lines they make.
+    Verse is first tried where none of its lines must part. If even the smallest
+    overflows, the words are cut back to the last whole sentence that fits.
     """
     avail_w = EPD_WIDTH - 2 * MARGIN_X
     avail_h = EPD_HEIGHT - 2 * MARGIN_Y
@@ -279,7 +242,7 @@ def layout(
             ):
                 return lines, f
 
-    # Overflow: estimate how much text fits at the smallest size and trim to it.
+    # Too much to stand: cut back to what the smallest hand can hold.
     size = setting.sizes[-1]
     f = font(size, path)
     max_lines = max(1, avail_h // int(size * setting.line_spacing))
@@ -289,17 +252,12 @@ def layout(
     return wrap(trimmed, f, avail_w)[:max_lines], f
 
 
-# ── Vertical layout (縦書き) ──────────────────────────────────────────────────
+# ── Writing in columns (縦書き) ───────────────────────────────────────────────
 
 
 def vertical_tokens(text: str, f: ImageFont.FreeTypeFont) -> list[tuple[str, int]]:
-    """
-    Split text into (token, cells) pairs for vertical setting.
-
-    A CJK character occupies one square cell. A run of latin is set sideways as a
-    single unit and occupies as many cells as its rotated length needs, which
-    keeps words intact rather than stacking them letter by letter.
-    """
+    # (piece, cells): a Japanese character fills one square; a latin word is
+    # laid on its side, whole, across as many squares as it needs.
     cell = int(f.size)
     out: list[tuple[str, int]] = []
     buf = ""
@@ -326,40 +284,44 @@ def vertical_tokens(text: str, f: ImageFont.FreeTypeFont) -> list[tuple[str, int
     return out
 
 
+def _close_column(columns: list[str], cur: str) -> None:
+    # A line's end closes the column; an empty one is the gap between stanzas.
+    if cur.strip():
+        columns.append(cur)
+    elif columns and columns[-1]:
+        columns.append("")
+
+
+def _takes_space(cur: str) -> bool:
+    # A space never opens a column, and between kana it would be a gap the Entity
+    # did not mean.
+    return bool(cur) and not CJK_RE.match(cur[-1])
+
+
 def wrap_vertical(text: str, f: ImageFont.FreeTypeFont, per_column: int) -> list[str]:
-    # Greedy fill, one column at a time, top to bottom. Columns are returned in
-    # reading order: the first is the rightmost on the panel.
+    # Columns filled one by one, top to bottom, in the order they are read: the
+    # first stands rightmost. As across, so down: closing punctuation hangs below
+    # the column's foot, and is never left to open one.
     columns: list[str] = []
     cur = ""
     used = 0
     for tok, cells in vertical_tokens(text, f):
+        hang = 1 if tok in NO_LINE_START else 0
         if tok == "\n":
-            if cur.strip():
-                columns.append(cur)
-            elif columns and columns[-1]:
-                columns.append("")   # a blank line: the paragraph break
+            _close_column(columns, cur)
             cur, used = "", 0
-            continue
-        if tok == " ":
-            # A space is only a break opportunity; it never opens a column, and
-            # between kana it would read as a gap the entity did not intend.
-            if cur and not CJK_RE.match(cur[-1]):
+        elif tok == " ":
+            if _takes_space(cur):
                 cur += " "
                 used += 1
-            continue
-
-        # The same kinsoku rule as horizontally: a column cannot begin with
-        # closing punctuation, so it hangs below the bottom margin instead.
-        hang = 1 if tok in NO_LINE_START else 0
-        if not cur and columns and tok in NO_LINE_START:
+        elif not cur and columns and hang:
             columns[-1] += tok
-            continue
-        if used + cells <= per_column + hang or not cur:
-            cur += tok
-            used += cells
-        else:
+        elif cur and used + cells > per_column + hang:
             columns.append(cur)
             cur, used = tok, cells
+        else:
+            cur += tok
+            used += cells
     if cur.strip():
         columns.append(cur)
     return columns
@@ -368,7 +330,7 @@ def wrap_vertical(text: str, f: ImageFont.FreeTypeFont, per_column: int) -> list
 def layout_vertical(
     text: str, setting: Setting = NORMAL
 ) -> tuple[list[str], ImageFont.FreeTypeFont]:
-    # As layout(), but fitting columns across the panel instead of lines down it.
+    # As layout(), but columns across the panel rather than lines down it.
     avail_w = EPD_WIDTH - 2 * MARGIN_X
     avail_h = EPD_HEIGHT - 2 * MARGIN_Y
 
@@ -403,9 +365,8 @@ def draw_vertical_glyph(
     cells: int,
     color: tuple[int, int, int],
 ) -> None:
-    # One cell of a vertical column: upright, nudged into the corner, or sideways.
+    # One square of a column: upright, set in its corner, or laid on its side.
     if token in VERTICAL_TOP_RIGHT:
-        # Vertical commas and full stops sit in the upper right of their square.
         x0, y0, x1, y1 = f.getbbox(token)
         inset = cell * 0.08
         px = center_x + cell / 2 - inset - x1
@@ -414,7 +375,6 @@ def draw_vertical_glyph(
         return
 
     if len(token) == 1 and token in VERTICAL_ROTATE:
-        # Brackets, dashes and the long-vowel mark turn a quarter turn clockwise.
         box = cell * 2
         mask = Image.new("L", (box, box), 0)
         ImageDraw.Draw(mask).text((box / 2, box / 2), token, font=f, fill=255, anchor="mm")
@@ -423,8 +383,7 @@ def draw_vertical_glyph(
         return
 
     if len(token) > 1 or not CJK_RE.match(token):
-        # A latin run, set sideways and reading top to bottom, centred in the
-        # cells reserved for it.
+        # A latin word on its side, read top to bottom, centred in its squares.
         width = int(f.getlength(token)) + 4
         height = int(f.size * 1.4)
         mask = Image.new("L", (width, height), 0)
@@ -444,7 +403,6 @@ def draw_vertical_glyph(
 
 
 def column_cells(column: str, f: ImageFont.FreeTypeFont) -> list[tuple[str, int]]:
-    # Re-split a laid-out column into the cells it will be drawn in.
     return [(tok, cells) for tok, cells in vertical_tokens(column, f) if cells]
 
 
@@ -463,10 +421,9 @@ def render_vertical(
     cell = int(f.size)
     col_w = int(f.size * setting.column_spacing)
 
-    # Columns are a block centred horizontally; within it they run right to left.
+    # The columns stand centred together, running right to left, all from one top line.
     block_w = extent(columns, col_w)
     right_edge = (EPD_WIDTH + block_w) / 2
-    # All columns start on the same top line, and the longest one centres the block.
     longest = max(sum(c for _, c in column_cells(col, f)) for col in columns)
     top = (EPD_HEIGHT - longest * cell) / 2
 
@@ -484,12 +441,11 @@ def render_vertical(
     return image
 
 
-# ── Rendering ─────────────────────────────────────────────────────────────────
+# ── Drawing ───────────────────────────────────────────────────────────────────
 
 
 def trim_to_sentence(text: str, keep: int) -> str:
-    # Last resort when text overflows even the smallest font: cut back to the last
-    # sentence end that fits, so the panel never shows a severed clause.
+    # The last whole sentence within keep: the panel never bears a severed clause.
     cut = text[:keep]
     for mark in ("。", ". ", "! ", "? ", "！", "？", ".", "!", "?"):
         idx = cut.rfind(mark)
@@ -499,8 +455,7 @@ def trim_to_sentence(text: str, keep: int) -> str:
 
 
 def too_wide(text: str) -> list[str]:
-    # The lines of text that would have to wrap even at UNBROKEN_MIN_SIZE: the
-    # ones that keep verse from being set whole.
+    # The lines of verse that could not stand whole even at UNBROKEN_MIN_SIZE.
     vertical = is_vertical(text)
     f = font(UNBROKEN_MIN_SIZE, None if vertical else LATIN_FONT_PATH)
     if not vertical:
@@ -509,14 +464,13 @@ def too_wide(text: str) -> list[str]:
     per_column = (EPD_HEIGHT - 2 * MARGIN_Y) // UNBROKEN_MIN_SIZE
     return [
         line for line in text.splitlines()
-        # closing punctuation may hang below the column, as in wrap_vertical
         if sum(c for _, c in vertical_tokens(line, f))
         > per_column + (1 if line and line[-1] in NO_LINE_START else 0)
     ]
 
 
 def fits(text: str) -> bool:
-    # True when the whole text fits one screen, at whatever size, with nothing trimmed.
+    # Whether all of the words stand on one screen, at any size, with nothing cut.
     if is_vertical(text):
         units, _ = layout_vertical(text)
         shown = "".join(units)
@@ -532,9 +486,7 @@ def render_text(
     background: tuple[int, int, int] = BACKGROUND,
     dense: bool = False,
 ) -> Image.Image:
-    # Bare text, centred on a blank panel: Japanese vertical, latin horizontal.
-    # No header, rule or footer. Both colours should be from the panel's six, or
-    # they come out dithered. dense sets it below the usual floor (the prayer).
+    # The words alone, centred, and nothing else: no header, no rule, no footer.
     setting = DENSE if dense else NORMAL
     if not text.strip():
         return Image.new("RGB", (EPD_WIDTH, EPD_HEIGHT), background)
@@ -556,20 +508,16 @@ def render_text(
     return image
 
 
-# The refresh itself (~19.5 s) is the panel's own waveform, stored in its
-# controller; nothing here can shorten it without leaving ghosting behind. What
-# can go is the vendor driver's padding around it: a 200 ms pause after every
-# busy-wait (the busy pin has already said the panel is idle) and a 2 s pause
-# after the deep-sleep command. That one cannot go entirely: the busy pin drops
-# on the sleep command, and gpiozero reports the edge up to ~300 ms later — if
-# the pins are closed first, its callback thread raises at shutdown. Together
-# about 2.5 s of a ~23 s update.
-BUSY_SETTLE_MS = 10      # vendor: 200
-SLEEP_SETTLE_MS = 500    # vendor: 2000; 300 measured clean, 100 not
+# The repaint itself (~19.5 s) is the panel's own and cannot be hastened. The
+# driver's waiting around it can: 200 ms after every busy-wait, and 2 s after
+# sleep. Not all of the latter: gpiozero hears the busy pin fall up to ~300 ms
+# after sleep, and raises if the pins are already closed. About 2.5 s are spared.
+BUSY_SETTLE_MS = 10      # the driver's: 200
+SLEEP_SETTLE_MS = 500    # the driver's: 2000; 300 measured clean, 100 not
 
 
 def _read_busy(epd) -> None:
-    # epd4in0e.EPD.ReadBusyH with the settle pause shortened.
+    # The driver's ReadBusyH, with less waiting.
     from waveshare_epd import epdconfig
 
     while epdconfig.digital_read(epd.busy_pin) == 0:   # 0: busy, 1: idle
@@ -579,14 +527,9 @@ def _read_busy(epd) -> None:
 
 class Display:
     """
-    The e-paper panel, or a PNG stand-in when no panel is present.
-
-    Each show() runs init -> display -> sleep. The panel is deep-slept between
-    updates because the vendor documentation warns against leaving it powered at
-    refresh voltage, and a session can idle for minutes between utterances.
-
-    Set EPAPER_MOCK=1 (or simply run off a Pi, where the driver import fails) to
-    write screen.png instead and print the text to the terminal.
+    The panel, or where there is none (off the Pi, or EPAPER_MOCK=1), screen.png
+    and the terminal. Between screens the panel sleeps deeply, as its makers ask:
+    it must not rest at the voltage of a repaint.
     """
 
     def __init__(self, mock: bool | None = None) -> None:
@@ -599,7 +542,7 @@ class Display:
                 self.epd = epd4in0e.EPD()
                 self.epd.ReadBusyH = types.MethodType(_read_busy, self.epd)
             except Exception as e:
-                print(f"  [display: no panel ({e}) — falling back to screen.png]")
+                print(f"  [no panel is here ({e}) — the words go to screen.png]")
                 self.mock = True
 
     def show(
@@ -609,8 +552,7 @@ class Display:
         background: tuple[int, int, int] = BACKGROUND,
         dense: bool = False,
     ) -> None:
-        # Render and push one screen. Blocks for the full refresh, by design:
-        # nothing should be recorded while the words are still appearing.
+        # One screen, waited for to the end: nothing is heard while words still appear.
         image = render_text(text, color, background, dense)
         if self.mock:
             self._show_mock(image, text, dense)
@@ -621,20 +563,10 @@ class Display:
             image = image.rotate(PANEL_ROTATION, expand=True)
         self.epd.display(self.epd.getbuffer(image))
         self._sleep()
-        print(f"  [displayed in {time.monotonic() - started:.1f}s]")
-
-    def clear(self) -> None:
-        # Blank the panel and sleep it. Called at the end of every session.
-        if self.mock:
-            print("  [display cleared]")
-            render_text("").save("screen.png")
-            return
-        self.epd.init()
-        self.epd.Clear()
-        self._sleep()
+        print(f"  [written in {time.monotonic() - started:.1f}s]")
 
     def _sleep(self) -> None:
-        # epd4in0e.EPD.sleep with the settle pause shortened.
+        # The driver's sleep, with less waiting.
         from waveshare_epd import epdconfig
 
         self.epd.send_command(0x07)   # DEEP_SLEEP
@@ -643,7 +575,7 @@ class Display:
         epdconfig.module_exit()
 
     def close(self) -> None:
-        # Release SPI/GPIO. Safe to call when nothing was ever initialised.
+        # The pins released; safe even if the panel was never woken.
         if self.mock or self.epd is None:
             return
         try:
@@ -658,7 +590,7 @@ class Display:
         setting = DENSE if dense else NORMAL
         if is_vertical(text):
             columns, f = layout_vertical(text, setting)
-            # Printed as it is set: the first column on the right.
+            # As it is written: the first column on the right.
             grid = [list(c) for c in columns]
             depth = max((len(c) for c in grid), default=0)
             print(f"  [screen.png — vertical, {int(f.size)}px, {len(columns)} columns]")

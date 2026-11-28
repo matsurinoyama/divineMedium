@@ -1,18 +1,15 @@
 """
-The god's presence in the room, carried over from tuhanKami: two TP-Link Tapo
-smart plugs, one driving the fans and one the lights.
+The Entity's presence in the room, through two Tapo plugs.
 
-  The fans are its travel: they blow while it draws near (the voice being
-  cloned from the prayer) and while it departs (the farewell).
-  The lights are the world without it: on between sessions, off once it has
-  arrived, on again after the last bell.
+  The fans are its travel: they blow while it draws near and while it departs.
+  The lights are the world without it: on between rituals, out once it has
+  come, on again after the last bell.
 
-Plugs are switched in order on one background thread, so the ritual never waits
-for a Tapo handshake (a second or two). An unset address or a plug that cannot be
-reached is skipped with a message — it never interrupts a session.
+Each plug is switched in order on a thread of its own, so the ritual never waits
+on a handshake. A plug unnamed or out of reach is passed over, and said so.
 
-  TPLINK_FAN, TPLINK_LIGHT        the plugs' IP addresses
-  TPLINK_USERNAME, TPLINK_PASSWORD  the TP-Link (Tapo) account
+  TPLINK_FAN, TPLINK_LIGHT          the plugs' addresses
+  TPLINK_USERNAME, TPLINK_PASSWORD  the Tapo account
 """
 
 from __future__ import annotations
@@ -53,7 +50,7 @@ def _run() -> None:
             asyncio.run(_switch(name, on))
             print(f"  [{name} {'on' if on else 'off'}]")
         except Exception as e:
-            print(f"  [{name} plug unreachable: {type(e).__name__}: {e}]")
+            print(f"  [the {name} is out of reach: {type(e).__name__}: {e}]")
         finally:
             _outbox.task_done()
 
@@ -76,21 +73,20 @@ def lights(on: bool) -> None:
     _set(LIGHT, on)
 
 
+def at_rest() -> None:
+    # The room as it waits between rituals: still air, lights on.
+    fans(False)
+    lights(True)
+
+
 def flush(timeout: float = 10.0) -> None:
-    # Wait until every queued switch has been sent. Called before the program
-    # exits: once Python begins shutting down, the plugs can no longer be reached,
-    # and the room would be left as the session had it (fans on, lights off).
+    # Every switch sent before the program ends: once Python begins to close, the
+    # plugs are out of reach, and the room would stay as the ritual left it.
     deadline = time.monotonic() + timeout
     with _outbox.all_tasks_done:
         while _outbox.unfinished_tasks:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                print("  [plugs: gave up waiting for the last switch]")
+                print("  [the last switch was not heard]")
                 return
             _outbox.all_tasks_done.wait(remaining)
-
-
-def idle() -> None:
-    # Between sessions: still air, lights on.
-    fans(False)
-    lights(True)

@@ -1,14 +1,42 @@
-.env
-.venv/
-venv/
+# Python
 __pycache__/
-*.pyc
-screen.png
+*.py[cod]
+*$py.class
+*.egg-info/
+.Python
+
+# Virtual env
+venv/
+.venv/
+.venv
+env/
+.env/
+.env
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*~
+
+# Logs
+*.log
+
+test/
+debug*
+
+# Ritual
 prayer.wav
 prayer_upload.wav
 question.wav
-debug.wav
-/examples/*
+screen.png
 button.fifo
-.vscode/
-CAVESOUNDS.mp3
+/examples/*

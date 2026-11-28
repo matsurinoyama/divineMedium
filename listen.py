@@ -1,3 +1,9 @@
+"""
+The ear of the Entity. The prayer and every question are heard as they are
+spoken, so the words are known a breath after the seeker falls silent, and
+before, which is what lets the Entity answer a question not yet finished.
+"""
+
 from __future__ import annotations
 
 import asyncio
@@ -6,22 +12,16 @@ import threading
 
 import numpy as np
 import soundfile as sf
-
 from elevenlabs import RealtimeEvents
 from elevenlabs.client import ElevenLabs
 from elevenlabs.realtime.scribe import AudioFormat, CommitStrategy
 
-import tts
+from voice import with_retry
 
-# ElevenLabs Scribe, realtime: the prayer and every question are transcribed while
-# they are spoken, so the words are there about a second after the seeker stops
-# (Gemini, on the finished recording, took four to eight) — and, for a question,
-# before the seeker stops, which is what lets the entity answer midway.
 MODEL_ID = "scribe_v2_realtime"
-# Scribe on a finished recording: the fallback when the live connection fails.
+# For a finished recording, when the living ear could not be had.
 BATCH_MODEL_ID = "scribe_v2"
 BATCH_TIMEOUT_SECS = 30
-
 CONNECT_TRIES = 3
 
 FORMATS = {16000: AudioFormat.PCM_16000, 44100: AudioFormat.PCM_44100}
@@ -32,17 +32,17 @@ _CLOSE = object()
 
 class Listener:
     """
-    Live transcription of one question. Feed it the microphone as it records
-    (send); read what has been said so far (heard); when the seeker has finished,
-    finish() returns the final transcript. All network work runs on a private
-    event loop thread, so the recording loop never waits on it.
+    Hears one utterance as it is spoken. Feed it the microphone (send), ask what
+    has been heard so far (heard), and when the seeker is silent, finish() gives
+    the whole. Its listening runs on a thread of its own, so the recording never
+    waits on the network.
 
-    Any failure (no network, a refused key) only marks it failed: the caller then
-    transcribes the recording itself, and the question is not lost.
+    If the ear fails (no network, a refused key), it says so and falls quiet: the
+    recording is then heard whole, and nothing the seeker said is lost.
 
-    context: text the question is likely to echo — the seeker's prayer — sent with
-    the first audio so names and words from it are heard right ("妻", not "キバ").
-    rate: of the 16-bit PCM it is fed — 16000 for questions, 44100 for the prayer.
+    context: words the seeker is likely to repeat (their prayer), so that names
+    from it are heard rightly ("妻", not "キバ").
+    rate: of the 16-bit PCM it is fed, 16000 for a question, 44100 for the prayer.
     """
 
     def __init__(
@@ -62,16 +62,14 @@ class Listener:
 
     @property
     def heard(self) -> str:
-        # The words so far: the final transcript once there is one, else the latest partial.
         return self.final if self.final is not None else self.partial
 
     def send(self, pcm: bytes) -> None:
-        # 16-bit PCM at the listener's rate, in the order it was recorded.
         if not self.failed:
             self.loop.call_soon_threadsafe(self.queue.put_nowait, pcm)
 
     def finish(self, timeout: float = 4.0) -> str:
-        # The seeker has stopped: ask for the final transcript and wait for it.
+        # The seeker is silent: the whole of what they said.
         if not self.failed:
             self.loop.call_soon_threadsafe(self.queue.put_nowait, _COMMIT)
             self.committed.wait(timeout)
@@ -83,12 +81,11 @@ class Listener:
         self.loop.call_soon_threadsafe(self.queue.put_nowait, _CLOSE)
 
     def fail(self, e: BaseException) -> None:
-        # Once we are closing, the server's errors about the closed socket
-        # ("no close frame received") are not failures: the transcript is in.
+        # Once closing, complaints about the closed socket are no failure: the words are in.
         if self.closing:
             return
         if not self.failed:
-            print(f"  [listen: live transcription unavailable — {type(e).__name__}: {e}]")
+            print(f"  [the ear is closed — {type(e).__name__}: {e}]")
         self.failed = True
         self.committed.set()
 
@@ -100,21 +97,21 @@ class Listener:
         self.committed.set()
 
     async def connect(self, client: ElevenLabs, language: str):
-        # A slow network can time the handshake out; audio sent meanwhile waits in
-        # the queue, so trying again loses nothing.
+        # A slow network may let the first greeting lapse; what is spoken meanwhile
+        # waits in the queue, so trying again loses nothing.
         for attempt in range(1, CONNECT_TRIES + 1):
             try:
                 return await client.speech_to_text.realtime.connect({
                     "model_id": MODEL_ID,
                     "audio_format": FORMATS[self.rate],
                     "sample_rate": self.rate,
-                    "commit_strategy": CommitStrategy.MANUAL,   # our own speech detection decides
+                    "commit_strategy": CommitStrategy.MANUAL,   # the silence decides, not the ear
                     "language_code": language,
                 })
             except Exception as e:
                 if attempt == CONNECT_TRIES or self.closing:
                     raise
-                print(f"  [listen: {type(e).__name__} connecting — retry {attempt}/{CONNECT_TRIES - 1}]")
+                print(f"  [the ear: {type(e).__name__} — again, {attempt}/{CONNECT_TRIES - 1}]")
                 await asyncio.sleep(1.0)
 
     async def run(self, client: ElevenLabs, language: str) -> None:
@@ -139,7 +136,7 @@ class Listener:
                 elif not self.failed:
                     message = {"audio_base_64": base64.b64encode(item).decode()}
                     if self.context:
-                        # Context may only go with the first chunk of audio
+                        # The context may travel only with the first breath
                         message["previous_text"], self.context = self.context, ""
                     await conn.send(message)
         except Exception as e:
@@ -154,19 +151,15 @@ class Listener:
 
 def transcribe(client: ElevenLabs, wav_path: str, language: str | None = None) -> str:
     """
-    Transcribe a finished recording with Scribe: the fallback for when a live
-    transcript could not be had, and for debug.wav.
-
-    A dropped connection is retried, and no single try may hang past
-    BATCH_TIMEOUT_SECS. language, if given, is a hint; if the hint yields nothing
-    (a seeker who consented in Japanese but prays in English), it listens once
-    more without it.
+    A finished recording, heard whole: when the living ear failed, and for
+    debug.wav. If the tongue given yields nothing (a seeker who consented in
+    Japanese but prays in English), it is heard once more with no tongue assumed.
     """
     with open(wav_path, "rb") as f:
         audio = f.read()
     kwargs = {"language_code": language} if language else {}
     try:
-        result = tts.with_retry(
+        result = with_retry(
             lambda: client.speech_to_text.convert(
                 file=("speech.wav", audio, "audio/wav"),
                 model_id=BATCH_MODEL_ID,
@@ -176,19 +169,13 @@ def transcribe(client: ElevenLabs, wav_path: str, language: str | None = None) -
             "listen",
         )
     except Exception as e:
-        print(f"  [listen: transcription failed — {type(e).__name__}: {e}]")
+        print(f"  [the words could not be heard — {type(e).__name__}: {e}]")
         return ""
     text = (result.text or "").strip()
     if not text:
-        diagnose(wav_path)
+        data, rate = sf.read(wav_path)
+        level = float(np.sqrt(np.mean(np.square(data)))) if len(data) else 0.0
+        print(f"  [only silence was heard — {len(data) / rate:.1f}s at {level:.4f} rms]")
         if language:
-            print("  [listen: nothing heard — trying again without the language hint]")
             return transcribe(client, wav_path, language=None)
     return text
-
-
-def diagnose(wav_path: str) -> None:
-    # Why a transcript came back empty: was anything much captured at all?
-    data, rate = sf.read(wav_path)
-    level = float(np.sqrt(np.mean(np.square(data)))) if len(data) else 0.0
-    print(f"  [listen: empty transcript — recording {len(data) / rate:.1f}s, level {level:.4f} rms]")

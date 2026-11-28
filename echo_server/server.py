@@ -1,18 +1,17 @@
 """
-The echo server, run on the Mac beside the surrounding speakers. The Pi tells it
-what the entity says; it answers with echoes, in the seeker's cloned voice, on
-the four speakers around the room. The bells stay on the Pi. From the moment it
-starts, the cave (CAVESOUNDS.mp3) loops on every speaker; the echoes play over it.
+The echo, on the Mac beside the speakers around the room. The Pi tells it what
+the Entity says; it answers with echoes in the same borrowed voice. Beneath them,
+from the moment it wakes, the cave sounds on every speaker.
 
-  POST /start  {"voice_id": ..., "language": "ja"}   a session begins
-  POST /utter  {"text": ...}                         the entity has spoken
-  POST /fade   {"secs": 20}                          the farewell bells: fade out
-  POST /end    {}                                    the session is over
+  POST /start  {"voice_id": ..., "language": "ja"}   a ritual begins
+  POST /utter  {"text": ...}                         the Entity has spoken
+  POST /fade   {"secs": 20}                          the farewell bells: fall silent
+  POST /end    {}                                    the ritual is over
   GET  /health
-  GET  /status                                       what happened this session
+  GET  /status                                       what became of this ritual's echoes
 
-  python server.py                 serve on 0.0.0.0:8765 (ECHO_PORT)
-  python server.py --devices       list the audio outputs, for ECHO_OUTPUTS
+  python server.py                 listen on 0.0.0.0:8765 (ECHO_PORT)
+  python server.py --devices       the speakers it can see, for ECHO_OUTPUTS
 """
 
 from __future__ import annotations
@@ -25,7 +24,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from dotenv import load_dotenv
 
-load_dotenv()
+# One .env for the Pi and the Mac, at the root of the project.
+load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env"))
 
 import anthropic
 import sounddevice as sd
@@ -46,7 +46,7 @@ class Session:
         player.reset()
 
     def close(self) -> None:
-        # Fade the echoes still sounding, in the background; the cave plays on.
+        # The echoes still sounding fade; the cave sounds on.
         if self.closed.is_set():
             return
         self.closed.set()
@@ -59,18 +59,18 @@ class Echo:
         self.eleven = ElevenLabs(api_key=os.environ["ELEVENLABS_API_KEY"])
         self.lock = threading.Lock()
         self.session: Session | None = None
-        # The speakers stay open for as long as the server runs, the cave beneath
+        # The speakers stay open as long as the echo wakes, the cave beneath
         self.player = echoes.EchoPlayer()
         self.player.start()
 
     def start(self, voice_id: str, language: str) -> None:
         with self.lock:
             if self.session is not None:
-                # The Pi never ended the last one (a crash, a power cut)
+                # The Pi never ended the last (a crash, a power cut)
                 self.session.close()
             echoes.LOG.clear()
             self.session = Session(voice_id, language, self.player)
-        echoes.note(f"session start: {language} · outputs {echoes.ECHO_OUTPUTS}")
+        echoes.note(f"a ritual begins: {language} · speakers {echoes.ECHO_OUTPUTS}")
 
     def utter(self, text: str) -> None:
         session = self.session
@@ -78,18 +78,18 @@ class Echo:
             return
 
         def make() -> None:
-            # Made in its own thread: an echo can be still forming when the next arrives.
+            # On a thread of its own: one echo may still be forming when the next comes.
             try:
-                fragments = echoes.echo_text(self.claude, text, session.language)
-                echoes.note(f"echo made: {fragments[:60]!r}")
+                fragments = echoes.shatter(self.claude, text, session.language)
+                echoes.note(f"echo shaped: {fragments[:60]!r}")
                 if session.closed.is_set():
                     return
-                audio = echoes.process(echoes.speak(self.eleven, session.voice_id, fragments))
-                # A session that ended while this was made does not hear it
+                audio = echoes.distort(echoes.speak(self.eleven, session.voice_id, fragments))
+                # A ritual that ended while this was shaped does not hear it
                 if not session.closed.is_set():
                     session.player.feed(audio)
                 else:
-                    echoes.note("echo finished after the session ended — dropped")
+                    echoes.note("echo shaped after the ritual ended — unheard")
             except Exception as e:
                 body = getattr(e, "body", None)
                 echoes.note(f"echo failed: {type(e).__name__}: {body or e}")
@@ -106,7 +106,7 @@ class Echo:
             session, self.session = self.session, None
         if session is not None:
             session.close()
-            echoes.note("session end")
+            echoes.note("the ritual is over")
 
 
 def handler(echo: Echo) -> type[BaseHTTPRequestHandler]:
@@ -158,13 +158,13 @@ def main() -> None:
         return
     echo = Echo()
     server = ThreadingHTTPServer(("0.0.0.0", PORT), handler(echo))
-    print(f"  [echo server on :{PORT} · outputs {echoes.ECHO_OUTPUTS}]")
+    print(f"  [the echo listens on :{PORT} · speakers {echoes.ECHO_OUTPUTS}]")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         echo.end()
         echo.player.stop()
-        print("\n  [Exiting.]")
+        print("\n  [The echo falls silent.]")
 
 
 if __name__ == "__main__":

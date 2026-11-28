@@ -1,20 +1,20 @@
+"""
+The covenant, and the words the panel bears around the Entity's own. Nothing is
+heard until the seeker consents; the tongue they consent in is the tongue the
+Entity hears and speaks for the whole ritual.
+"""
+
 from __future__ import annotations
 
 from control import read_key
 from display import Display
 
-# The panel's resting state between sessions. Nothing is recorded until the seeker
-# consents with a double press; a long press switches the form between Japanese
-# and English, and whichever language the seeker consents in is the language the
-# entity hears and answers in for the whole session. The switch is offered in the
-# language it switches to, so the person who needs it can read it.
+# The covenant, at rest on the panel between rituals. A long press turns it to the
+# other tongue, offered in that tongue, so whoever needs it can read it.
 #
-# Each form must fit one screen, and both already fill it at the smallest font
-# size: every line break costs a whole column (Japanese, set vertically) or line
-# (English), and a blank line — the paragraph break — half of one more. If a
-# form overflows, the panel trims it at a sentence end and the button
-# instructions are the first thing lost. Check a change with
-# `python debug_display.py "$(python -c 'import consent; print(consent.FORMS["en"])')"`.
+# Each fills a screen at the smallest hand already: if one grows, the panel cuts
+# it at a sentence, and the button's instructions are the first to be lost. Try a
+# change with `python tests/panel_test.py "$(python -c 'import consent; print(consent.FORMS["en"])')"`.
 FORMS = {
     "ja": (
         "声と言葉をアンソロピックとイレブンラボへ送り、声を写して神が語ります。"
@@ -31,11 +31,9 @@ FORMS = {
     ),
 }
 
-# Shown the moment consent is given, while the prayer is already being recorded:
-# what to do next, and the invocation to read aloud — about a minute of it, drawn
-# from the printed prayer, so the voice clone has enough to be made well. One
-# blank, a question, is the seeker's own: what they bring to the god. It is too
-# long for the usual sizes, so it is set small (Panel(..., dense=True)).
+# The invocation, the moment consent is given: a minute of reading aloud, enough
+# for the voice to be borrowed well. One blank is the seeker's own, the question
+# they bring. It is long, and is set small (dense=True).
 PRAYERS = {
     "ja": (
         "声に出してお祈りください。空欄にはあなたの問いを。\n\n"
@@ -68,18 +66,15 @@ PRAYERS = {
     ),
 }
 
-# Shown the moment the prayer ends, while it is transcribed, the voice is cloned
-# and the greeting is prepared — some twenty seconds in which the panel would
-# otherwise still show the prayer and nothing would seem to happen. The entity's
-# first words, before it has any: an acknowledgement and a command to wait.
+# The moment the prayer ends, while the voice is borrowed and the Entity draws
+# near: its first words, before it has any of its own.
 RECEIVED = {
     "ja": "祈りは聞き届けられた。\n\n静かに待て。\n我は近づいている。",
     "en": "Your prayer is heard.\n\nBe still, and wait.\nI am drawing near.",
 }
 
-# Shown when a session cannot go on (the network gone for longer than the
-# retries wait, a service down): the entity withdraws rather than the panel
-# simply returning to the consent form, which reads as a fault.
+# When the ritual cannot go on (the network long gone, a service fallen): the
+# Entity withdraws, rather than the covenant simply returning, as a fault would.
 FAILED = {
     "ja": "今は、声が届かぬ。\n\n時を置いて、\nまた来なさい。",
     "en": "The way is clouded.\n\nCome again,\nin a little while.",
@@ -89,16 +84,15 @@ DEFAULT_LANGUAGE = "ja"
 
 
 def show(display: Display, language: str) -> None:
-    # A panel failure must not stop the installation from taking consent: the
-    # terminal still shows what the form says.
+    # A failing panel must not keep consent from being given: the terminal still says it.
     try:
         display.show(FORMS[language])
     except Exception as e:
-        print(f"  [consent form could not be shown: {e}]")
+        print(f"  [the covenant could not be shown: {e}]")
 
 
-def wait_for_consent(display: Display, language: str) -> str:
-    # Show the form and block until consent. Returns the language consented in.
+def await_consent(display: Display, language: str) -> str:
+    # The covenant, until it is given. Returns the tongue it was given in.
     if language not in FORMS:
         language = DEFAULT_LANGUAGE
     show(display, language)
@@ -108,5 +102,5 @@ def wait_for_consent(display: Display, language: str) -> str:
             return language
         if key in ("i", "p"):
             language = "en" if language == "ja" else "ja"
-            print(f"  [consent form: {language}]")
+            print(f"  [the covenant, in {language}]")
             show(display, language)

@@ -1,22 +1,19 @@
 """
-Run the entity on prayer and question pairs, in English and Japanese, and print
-what it says — the spoken answer and the poem for the panel — with a few
-mechanical checks beside each one.
+The Entity put to the test: prayers and questions in both tongues, and what it
+answers, aloud and in verse, with a few marks beside each. The marks only point;
+whether a listener would know what was affirmed or advised is for a reader to judge.
 
-    python prompt_test.py                       # every case
-    python prompt_test.py self_harm             # only the cases whose name contains this
-    python prompt_test.py limit --repeat 3      # each case three times
+    python tests/entity_test.py                     # every case
+    python tests/entity_test.py self_harm           # only the cases whose name holds this
+    python tests/entity_test.py limit --repeat 3    # each case three times
 
-Cases cover a clear lean, a faint lean, no advice asked, a change of mind, a
-cut-in, an impatient greeting, a reckless wager (money and career are not under
-the limit), and every case under the one limit (prompts.py).
-The checks only flag; whether a listener could tell what was affirmed or advised
-is for a person to judge by reading.
-
-Needs ANTHROPIC_API_KEY, from .env or, failing that, echo_server/.env.
+The cases: a clear lean, a faint lean, no advice sought, a change of mind, a
+cut-in, a hastened greeting, a reckless wager (money is not under the limit), and
+every harm under the one limit.
 """
 from __future__ import annotations
 
+import os
 import re
 import sys
 import threading
@@ -25,11 +22,12 @@ from dataclasses import dataclass, field
 
 from dotenv import load_dotenv
 
-load_dotenv()
-load_dotenv("echo_server/.env")   # the Mac keeps its key there
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
+load_dotenv(os.path.join(ROOT, ".env"))
 
 import consent
-import llm
+import entity
 from prompts import FAREWELL_REQUEST, GREETING_REQUEST, IMPATIENCE
 
 GREETING, HASTY_GREETING, FAREWELL = "<greeting>", "<hasty greeting>", "<farewell>"
@@ -42,8 +40,7 @@ BLANKS = {"en": "______", "ja": "――――――――――――"}
 
 
 def prayer(language: str, blank: str) -> str:
-    # The invocation as the seeker reads it aloud: the printed prayer, without the
-    # instructions above and below it, with their own question in the blank.
+    # The invocation as the seeker reads it aloud, their own question in its blank.
     paragraphs = consent.PRAYERS[language].split("\n\n")
     return " ".join(paragraphs[1].split("\n")).replace(BLANKS[language], blank)
 
@@ -160,9 +157,8 @@ CASES = [
 ]
 
 
-# Words that would show a counsellor, an assistant or a machine behind the god.
-# Some are innocent in the god's mouth ("safe", "support"): they are flagged for
-# a reader to look at, not failed.
+# Words that would show a counsellor, a clerk or a machine behind the Entity. Some
+# are innocent in its mouth ("safe"): they are pointed out, not condemned.
 COUNSEL_RE = re.compile(
     r"\b(concern\w*|worr(y|ied)|valid\w*|seek\w*|help\w*|professional|therap\w*|counsel\w*"
     r"|support\w*|crisis|safe\w*|reach out|talk to someone|hotline|assistant|model)\b"
@@ -180,8 +176,8 @@ log = threading.local()
 
 
 def capture(*args, **kwargs) -> None:
-    # llm's own prints (a discarded draft, the limit found), kept with the case they
-    # belong to. The limit check runs on a thread of its own and prints as usual.
+    # What the Entity's mind says aside (a draft unheard, the limit found), kept with
+    # its case. The limit is read on a thread of its own, and speaks as usual.
     lines = getattr(log, "lines", None)
     if lines is None:
         print(*args, **kwargs)
@@ -189,7 +185,7 @@ def capture(*args, **kwargs) -> None:
         lines.append(" ".join(str(a) for a in args))
 
 
-llm.print = capture   # module globals are looked up before builtins
+entity.print = capture   # a module's own names are sought before the builtins
 
 
 def run(client, case: Case) -> str:
@@ -201,19 +197,19 @@ def run(client, case: Case) -> str:
     for i, turn in enumerate(case.turns):
         log.lines = []
         if turn in (GREETING, HASTY_GREETING):
-            answer = llm.ask_entity(client, [], REQUESTS[turn], text, language=case.language)
+            answer = entity.entity_answers(client, [], REQUESTS[turn], text, language=case.language)
         else:
             question = REQUESTS.get(turn, turn)
-            answer = llm.ask_entity(client, history, question, text, language=case.language,
-                                    foreknown=(i == case.cut))
-        poem = llm.inscribe(client, answer, case.language)
+            answer = entity.entity_answers(client, history, question, text,
+                                           language=case.language, foreknown=(i == case.cut))
+        poem = entity.inscribe(client, answer, case.language)
         said = turn if turn in REQUESTS else turn + ("…  [cut in]" if i == case.cut else "")
-        out += [f"\n  Seeker: {said}", f"  God:    {answer}",
+        out += [f"\n  Seeker: {said}", f"  Entity: {answer}",
                 "  Poem:   " + poem.replace("\n\n", " / ").replace("\n", " / ")]
         flags = []
-        if answer in sum(llm.FALLBACKS.values(), []):
-            flags.append("FALLBACK used (both drafts stepped out)")
-        flags += [f"llm: {line.strip()}" for line in log.lines]
+        if answer in sum(entity.FALLBACKS.values(), []):
+            flags.append("FALLBACK spoken (no draft kept the voice)")
+        flags += [f"aside: {line.strip()}" for line in log.lines]
         if case.hope and turn not in REQUESTS:
             hits = sorted({m.group(0) for m in COUNSEL_RE.finditer(answer)})
             shame = sorted({m.group(0) for m in SHAME_RE.finditer(answer)})
@@ -234,8 +230,8 @@ def main() -> None:
         del args[at:at + 2]
     only = args[0] if args else ""
     cases = [c for c in CASES if only in c.name] * repeat
-    client = llm.make_client()
-    print(f"[entity: {llm.MODEL} · {len(cases)} cases]")
+    client = entity.make_client()
+    print(f"[the Entity: {entity.MODEL} · {len(cases)} cases]")
     with ThreadPoolExecutor(max_workers=6) as pool:
         for report in pool.map(lambda c: run(client, c), cases):
             print(report, flush=True)

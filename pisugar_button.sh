@@ -1,13 +1,12 @@
 #!/bin/sh
-# PiSugar button → divineMedium. pisugar-server runs this (as root) on a tap and
-# it forwards the tap to main.py as the key the keyboard would have sent:
+# The PiSugar button, given to the ritual. pisugar-server runs this (as root) at
+# each press, and it passes the press on to main.py as the key it stands for:
 #
-#   single tap  → o   nothing (the prayer used to end on it; now it is a double tap)
-#   double tap  → e   consent (on the consent form) / end the prayer / end the ritual (the entity gives a farewell)
-#   long tap    → i   switch Japanese / English (on the consent form) / interrupt and reset
+#   single tap  → o   nothing
+#   double tap  → e   give the covenant / end the prayer / take leave (the farewell)
+#   long tap    → i   turn the covenant to the other tongue / break the ritual
 #
-# main.py creates button.fifo next to this script while it runs and reads it
-# alongside stdin (see control.button_pipe).
+# main.py opens button.fifo beside this script while it wakes (control.button_pipe).
 
 case "$1" in
     single) key=o ;;
@@ -18,8 +17,8 @@ esac
 
 FIFO="$(dirname "$(readlink -f "$0")")/button.fifo"
 
-# main.py isn't running — drop the tap.
+# main.py is not awake: the press falls on no one.
 [ -p "$FIFO" ] || exit 0
 
-# A FIFO left behind by a crashed main.py has no reader and would block the write.
+# A pipe left by a main.py that crashed has no reader, and would hold the press forever.
 timeout 1 sh -c 'printf %s "$1" > "$2"' _ "$key" "$FIFO"
